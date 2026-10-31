@@ -24,6 +24,36 @@ import {
   SyncSchema,
 } from "../types.js";
 
+function syncProjectLexicon(db: DatabaseInstance, projectId: string, dirPath: string) {
+  const candidates = [
+    path.join(dirPath, ".kb", "lexicon.json"),
+    path.join(dirPath, ".kblexicon.json"),
+    path.join(dirPath, "lexicon.json"),
+  ];
+  for (const file of candidates) {
+    if (fs.existsSync(file)) {
+      try {
+        const raw = JSON.parse(fs.readFileSync(file, "utf-8"));
+        if (typeof raw === "object" && raw !== null) {
+          const stmt = db.prepare(`
+            INSERT INTO project_lexicon (project_id, term, synonyms)
+            VALUES (?, ?, ?)
+            ON CONFLICT(project_id, term) DO UPDATE SET synonyms = excluded.synonyms
+          `);
+          for (const [term, syn] of Object.entries(raw)) {
+            if (term && typeof syn === "string") {
+              stmt.run(projectId, term.toLowerCase().trim(), syn.toLowerCase().trim());
+            }
+          }
+        }
+      } catch {
+        // ignore malformed custom json
+      }
+      break;
+    }
+  }
+}
+
 export async function handleIngestionTool(
   name: string,
   args: any,
@@ -163,6 +193,7 @@ export async function handleIngestionTool(
     refreshLinks(db);
     const lines = [`Sync ${project_id}: ${updated} updated, ${removed} removed, ${unchanged} unchanged${failed ? `, ${failed} failed` : ""}`];
     if (dir_path) {
+      syncProjectLexicon(db, project_id, dir_path);
       const r = await handleIngestionTool("kb_batch_ingest_directory", { project_id, dir_path, ignore }, db);
       lines.push(r?.content[0].text.split("\n").filter((l) => /Ingested|Failed/.test(l)).join(" ") ?? "");
     }
@@ -178,6 +209,8 @@ export async function handleIngestionTool(
         isError: true,
       };
     }
+
+    syncProjectLexicon(db, project_id, dir_path);
 
     const validExts = extensions || [".pdf", ".docx", ".md", ".txt", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".py", ".dart", ".json", ".sql"];
     // Generated code, build output and whatever the user lists in .kbignore (or passes as `ignore`) is noise to an agent

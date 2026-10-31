@@ -181,6 +181,70 @@ export function startHttpServer(db?: DatabaseInstance) {
       return;
     }
 
+    // 2c. Project Lexicon Endpoints (Adaptive domain vocabulary)
+    if (pathname === "/api/lexicon" && req.method === "GET") {
+      const pId = parsedUrl.searchParams.get("project_id");
+      if (!pId) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "project_id is required" }));
+        return;
+      }
+      const rows = database.prepare("SELECT term, synonyms FROM project_lexicon WHERE project_id = ?").all(pId) as Array<{ term: string; synonyms: string }>;
+      const lexicon: Record<string, string> = {};
+      for (const r of rows) lexicon[r.term] = r.synonyms;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ project_id: pId, lexicon }));
+      return;
+    }
+
+    if (pathname === "/api/lexicon" && req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", () => {
+        try {
+          const data = JSON.parse(body);
+          const { project_id, term, synonyms, lexicon } = data;
+          if (!project_id) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "project_id is required" }));
+            return;
+          }
+          const stmt = database.prepare(`
+            INSERT INTO project_lexicon (project_id, term, synonyms)
+            VALUES (?, ?, ?)
+            ON CONFLICT(project_id, term) DO UPDATE SET synonyms = excluded.synonyms
+          `);
+          if (lexicon && typeof lexicon === "object") {
+            for (const [k, v] of Object.entries(lexicon)) {
+              if (k && typeof v === "string") stmt.run(project_id, k.toLowerCase().trim(), v.toLowerCase().trim());
+            }
+          } else if (term && synonyms) {
+            stmt.run(project_id, String(term).toLowerCase().trim(), String(synonyms).toLowerCase().trim());
+          }
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: true }));
+        } catch (e: any) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: e.message }));
+        }
+      });
+      return;
+    }
+
+    if (pathname === "/api/lexicon" && req.method === "DELETE") {
+      const pId = parsedUrl.searchParams.get("project_id");
+      const term = parsedUrl.searchParams.get("term");
+      if (!pId || !term) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "project_id and term are required" }));
+        return;
+      }
+      database.prepare("DELETE FROM project_lexicon WHERE project_id = ? AND term = ?").run(pId, term.toLowerCase().trim());
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: true }));
+      return;
+    }
+
     // 3. Get Graph Topology
     if (pathname === "/api/graph" && req.method === "GET") {
       const projectId = parsedUrl.searchParams.get("project_id");

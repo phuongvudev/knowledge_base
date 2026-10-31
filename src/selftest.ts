@@ -565,6 +565,33 @@ await run("search: vietnamese phrases and everyday synonyms reach the code's own
   }
 });
 
+await run("project lexicon: scoped to project and loads from .kb/lexicon.json without domain pollution", async () => {
+  const dirMed = path.join(tmp, "med-proj");
+  fs.mkdirSync(path.join(dirMed, ".kb"), { recursive: true });
+  fs.writeFileSync(path.join(dirMed, ".kb", "lexicon.json"), JSON.stringify({
+    "bệnh nhân": "patient",
+    "đơn thuốc": "prescription",
+  }));
+  const fMed = path.join(dirMed, "patient.ts");
+  fs.writeFileSync(fMed, "export class PatientDiagnosis {\n  hasPrescription(): boolean { return true; }\n}\n");
+
+  await handleIngestionTool("kb_batch_ingest_directory", { project_id: "p-med", dir_path: dirMed }, db);
+
+  // Searching "bệnh nhân" in p-med resolves to "patient" and finds PatientDiagnosis
+  const medHit = (await handleQueryTool("kb_search", { query: "bệnh nhân", project_id: "p-med" }, db))!.content[0].text;
+  assert.ok(medHit.includes("patientdiagnosis"), `med hit: ${medHit}`);
+
+  // Searching "bệnh nhân" in another project (p-other) does NOT expand to "patient" (no cross-project pollution)
+  const otherDir = path.join(tmp, "other-proj");
+  fs.mkdirSync(otherDir, { recursive: true });
+  const fOther = path.join(otherDir, "dummy.ts");
+  fs.writeFileSync(fOther, "export class OtherPatient {\n}\n");
+  await handleIngestionTool("kb_batch_ingest_directory", { project_id: "p-other", dir_path: otherDir }, db);
+
+  const otherHit = (await handleQueryTool("kb_search", { query: "bệnh nhân", project_id: "p-other" }, db))!.content[0].text;
+  assert.ok(!otherHit.includes("otherpatient"), `other hit should not match: ${otherHit}`);
+});
+
 await run("startup prunes old logs", async () => {
   const ins = db.prepare("INSERT INTO ingest_jobs (project_id,label,status,started_at,updated_at) VALUES ('p-prune','x','done',1,1)");
   for (let i = 0; i < 600; i++) ins.run();

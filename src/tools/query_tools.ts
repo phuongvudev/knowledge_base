@@ -15,7 +15,7 @@ const STOPWORDS = new Set([
   "những", "trong", "được", "khi", "nào", "sao", "thế",
 ]);
 
-// Vietnamese phrases -> the English words code is written in (longest phrases first); "" drops filler
+// Universal Vietnamese action words -> common software equivalents; "" drops filler words
 const VI_EN: Array<[RegExp, string]> = [
   [/ứng dụng|người dùng/giu, ""],
   [/ghi nhớ|lưu trữ|lưu lại|\blưu\b/giu, "store save persist remember"],
@@ -24,40 +24,17 @@ const VI_EN: Array<[RegExp, string]> = [
   [/\bgửi\b/giu, "send upload"],
   [/xác thực|đăng nhập/giu, "auth login authenticate"],
   [/đăng xuất/giu, "logout signout"],
-  [/thông báo/giu, "notification notify alert"],
-  [/hóa đơn|biên lai/giu, "receipt invoice bill"],
-  [/ngân sách/giu, "budget"],
-  [/giao dịch/giu, "transaction transfer payment"],
-  [/tài khoản/giu, "account"],
-  [/số dư/giu, "balance remaining"],
-  [/chi tiêu|chi phí|khoản chi|\bchi\b/giu, "expense expenditure cost spend payout"],
-  [/thu nhập|khoản thu|\bthu\b/giu, "income revenue earn"],
-  [/danh mục|phân loại|\bloại\b/giu, "category classification type group"],
-  [/tiền tệ|tiền|tiền mặt/giu, "currency money cash amount"],
-  [/ví tiền|\bví\b/giu, "wallet balance purse"],
-  [/tiết kiệm|mục tiêu/giu, "saving savings goal target"],
-  [/khoản nợ|vay nợ|\bnợ\b/giu, "debt loan credit borrow lend liability"],
-  [/định kỳ|lặp lại|chu kỳ/giu, "recurring periodic repeat interval schedule"],
-  [/tính tổng|tổng cộng|\btổng\b/giu, "total sum calculate aggregate summary"],
-  [/báo cáo|thống kê/giu, "report statistics analytics chart"],
-  [/kho dữ liệu|kho lưu trữ|\bkho\b/giu, "repository repo store dao"],
-  [/điều hướng|chuyển màn hình/giu, "router route navigation navigate"],
-  [/xử lý|thực thi/giu, "handle handler process execute dispatch"],
-  [/thực thể|mô hình dữ liệu/giu, "entity model schema dto"],
-  [/trạng thái/giu, "status state flag condition"],
-  [/thời gian|ngày tháng|hạn chót/giu, "date time timestamp deadline due"],
-  [/ngân hàng/giu, "bank banking statement"],
+  [/thông báo/giu, "notification alert"],
   [/thử lại/giu, "retry"],
-  [/mã hóa/giu, "encrypt encryption crypto"],
-  [/bảo mật/giu, "security secret token password"],
-  [/\blỗi\b|ngoại lệ/giu, "error exception failure fault"],
-  [/cấu hình|thiết lập/giu, "config configuration settings setup"],
-  [/đồng bộ/giu, "sync synchronize refresh"],
-  [/xóa|hủy bỏ/giu, "delete remove discard cancel"],
-  [/tìm kiếm|tra cứu/giu, "search query find lookup filter"],
-  [/lọc|sắp xếp/giu, "filter sort order query"],
+  [/mã hóa/giu, "encrypt crypto"],
+  [/bảo mật/giu, "security secret"],
+  [/\blỗi\b|ngoại lệ/giu, "error exception failure"],
+  [/cấu hình|thiết lập/giu, "config settings setup"],
+  [/đồng bộ/giu, "sync synchronize"],
+  [/xóa|hủy bỏ/giu, "delete remove discard"],
+  [/tìm kiếm|tra cứu/giu, "search query find lookup"],
 ];
-// Everyday words -> the terms code usually names them with; only used when the exact words found nothing
+// Universal developer synonyms: only used to widen the OR pass when exact match finds nothing
 const SYNONYMS: Array<[RegExp, string]> = [
   [/\b(allowed|allowlist|whitelist|permitted|blocked|forbidden)\b/i, "policy check validate reject"],
   [/\b(servers?|calling|outbound)\b/i, "endpoint url request client api"],
@@ -65,8 +42,6 @@ const SYNONYMS: Array<[RegExp, string]> = [
   [/\b(credential|password|token)\b/i, "secret key auth jwt"],
   [/\b(wait|longer)\b/i, "backoff delay timeout debounce"],
   [/\b(consent|agreed?)\b/i, "accepted accept terms permission"],
-  [/\b(shop|store|vendor|seller)\b/i, "merchant partner payee"],
-  [/\b(calc|calculate|calculation|sum)\b/i, "compute total aggregate balance"],
   [/\b(error|fail|failed|failure)\b/i, "exception reject catch fault"],
 ];
 
@@ -192,12 +167,33 @@ export async function handleQueryTool(
     const { query, project_id, limit, code, max_tokens } = SearchSchema.parse(args);
 
     // Keep unicode letters/digits (Vietnamese diacritics); quote each token so FTS operators can't break the query
-    const viQuery = VI_EN.reduce((q, [re, en]) => q.replace(re, ` ${en} `), query);
+    let viQuery = VI_EN.reduce((q, [re, en]) => q.replace(re, ` ${en} `), query);
+
+    // Project-specific domain lexicon (strictly scoped to project_id)
+    const projectExtra: string[] = [];
+    if (project_id) {
+      try {
+        const rows = db.prepare("SELECT term, synonyms FROM project_lexicon WHERE project_id = ?").all(project_id) as Array<{ term: string; synonyms: string }>;
+        for (const r of rows) {
+          const re = new RegExp(`\\b${r.term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "giu");
+          if (re.test(viQuery)) {
+            viQuery = viQuery.replace(re, ` ${r.synonyms} `);
+            projectExtra.push(...r.synonyms.split(/\s+/).filter(Boolean));
+          }
+        }
+      } catch {
+        // ignore if table not present
+      }
+    }
+
     const all = viQuery.match(/[\p{L}\p{N}_]+/gu) || [];
     // Question words drown the real keywords once AND falls back to OR
     const content = all.filter((t) => t.length > 2 && !STOPWORDS.has(t.toLowerCase()));
     const tokens = content.length ? content : all;
-    const extra = SYNONYMS.filter(([re]) => re.test(viQuery)).flatMap(([, add]) => add.split(" "));
+    const extra = [
+      ...SYNONYMS.filter(([re]) => re.test(viQuery)).flatMap(([, add]) => add.split(" ")),
+      ...projectExtra,
+    ];
     if (tokens.length === 0) {
       return {
         content: [{ type: "text", text: "Search query must contain valid keywords." }],
