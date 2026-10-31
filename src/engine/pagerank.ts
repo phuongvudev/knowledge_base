@@ -24,6 +24,9 @@ export function computeCentrality(
     });
   }
 
+  // Pre-build incoming edges map for O(1) lookups in PageRank loop
+  const inEdgesMap = new Map<string, string[]>();
+
   for (const edge of edges) {
     const src = centralityMap.get(edge.source_id);
     const tgt = centralityMap.get(edge.target_id);
@@ -36,9 +39,16 @@ export function computeCentrality(
       tgt.inDegree += 1;
       tgt.totalDegree += 1;
     }
+
+    let inList = inEdgesMap.get(edge.target_id);
+    if (!inList) {
+      inList = [];
+      inEdgesMap.set(edge.target_id, inList);
+    }
+    inList.push(edge.source_id);
   }
 
-  // Simplified PageRank algorithm (3 iterations)
+  // Simplified PageRank algorithm (5 iterations)
   const damping = 0.85;
   const initialScore = 1.0 / Math.max(1, nodes.length);
   const scores = new Map<string, number>();
@@ -52,15 +62,16 @@ export function computeCentrality(
 
     for (const node of nodes) {
       let incomingRank = 0;
-      // All edges pointing to 'node'
-      const inEdges = edges.filter((e) => e.target_id === node.id);
-      for (const edge of inEdges) {
-        const srcCent = centralityMap.get(edge.source_id);
-        const outDeg = srcCent ? Math.max(1, srcCent.outDegree) : 1;
-        incomingRank += (scores.get(edge.source_id) || 0) / outDeg;
+      const sources = inEdgesMap.get(node.id);
+      if (sources) {
+        for (const sourceId of sources) {
+          const srcCent = centralityMap.get(sourceId);
+          const outDeg = srcCent ? Math.max(1, srcCent.outDegree) : 1;
+          incomingRank += (scores.get(sourceId) || 0) / outDeg;
+        }
       }
 
-      const newScore = (1 - damping) / nodes.length + damping * incomingRank;
+      const newScore = (1 - damping) / Math.max(1, nodes.length) + damping * incomingRank;
       nextScores.set(node.id, newScore);
     }
 
@@ -82,13 +93,20 @@ export function computeCentrality(
 export function filterHubNodes(
   nodes: GraphNode[],
   edges: GraphEdge[],
-  topK: number = 10
-): { hubNodes: GraphNode[]; hubEdges: GraphEdge[]; otherCount: number } {
+  topK: number = 10,
+  existingCentrality?: Map<string, NodeCentrality>
+): {
+  hubNodes: GraphNode[];
+  hubEdges: GraphEdge[];
+  otherCount: number;
+  centrality: Map<string, NodeCentrality>;
+} {
+  const centrality = existingCentrality || computeCentrality(nodes, edges);
+
   if (nodes.length <= topK) {
-    return { hubNodes: nodes, hubEdges: edges, otherCount: 0 };
+    return { hubNodes: nodes, hubEdges: edges, otherCount: 0, centrality };
   }
 
-  const centrality = computeCentrality(nodes, edges);
   const sorted = [...nodes].sort((a, b) => {
     const scoreA = centrality.get(a.id)?.score || 0;
     const scoreB = centrality.get(b.id)?.score || 0;
@@ -106,5 +124,6 @@ export function filterHubNodes(
     hubNodes,
     hubEdges,
     otherCount: nodes.length - hubNodes.length,
+    centrality,
   };
 }

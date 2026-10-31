@@ -1,8 +1,8 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useMemo } from "react";
 import { Network } from "vis-network";
-import { Maximize2, ZoomIn, ZoomOut, Play, Pause } from "lucide-react";
+import { Maximize2, ZoomIn, ZoomOut, Play, Pause, Search, X } from "lucide-react";
 import { Button } from "./ui/button";
 
 export interface GraphNode {
@@ -53,13 +53,25 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const networkRef = useRef<Network | null>(null);
   const [isPhysicsActive, setIsPhysicsActive] = useState(true);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [isSearching, setIsSearching] = useState(false);
 
+  // Initialize or update network when nodes or edges change
   useEffect(() => {
     if (!containerRef.current) return;
 
+    if (nodes.length === 0) {
+      if (networkRef.current) {
+        networkRef.current.destroy();
+        networkRef.current = null;
+      }
+      return;
+    }
+
+    const isLarge = nodes.length > 50;
+
     const visNodes = nodes.map((n) => {
       const col = TYPE_COLORS[n.node_type] || TYPE_COLORS.default;
-      const isSelected = selectedNodeId === n.id;
       return {
         id: n.id,
         label: n.label,
@@ -71,8 +83,8 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
             ? "database"
             : "box",
         color: {
-          background: isSelected ? "#ef4444" : col.bg,
-          border: isSelected ? "#fca5a5" : col.border,
+          background: col.bg,
+          border: col.border,
           highlight: { background: "#ef4444", border: "#f87171" },
           hover: { background: col.bg, border: "#ffffff" },
         },
@@ -83,7 +95,7 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
         },
         margin: 10,
         borderWidth: n.is_hub ? 3 : 1,
-        shadow: n.is_hub
+        shadow: n.is_hub && !isLarge
           ? { enabled: true, color: "rgba(99, 102, 241, 0.4)", size: 10 }
           : false,
       };
@@ -92,17 +104,25 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
     const visEdges: any[] = edges.map((e) => ({
       from: e.source_id,
       to: e.target_id,
-      label: e.relation_type,
+      label: isLarge ? undefined : e.relation_type,
       arrows: "to",
       font: { size: 9, color: "#94a3b8", align: "middle", strokeWidth: 0 },
       color: { color: "#334155", highlight: "#ef4444", hover: "#64748b" },
-      smooth: { enabled: true, type: "continuous", roundness: 0.2 },
+      smooth: isLarge ? false : { enabled: true, type: "continuous", roundness: 0.2 },
       width: 1.2,
     }));
 
     const options = {
       physics: {
-        solver: "barnesHut",
+        solver: isLarge ? "forceAtlas2Based" : "barnesHut",
+        forceAtlas2Based: {
+          gravitationalConstant: -50,
+          centralGravity: 0.01,
+          springLength: 90,
+          springConstant: 0.08,
+          damping: 0.4,
+          avoidOverlap: 0.5,
+        },
         barnesHut: {
           gravitationalConstant: -4000,
           centralGravity: 0.3,
@@ -110,21 +130,37 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
           springConstant: 0.04,
           damping: 0.09,
         },
-        stabilization: { iterations: 100 },
+        stabilization: {
+          enabled: true,
+          iterations: isLarge ? 40 : 100,
+          updateInterval: 20,
+        },
       },
       interaction: {
         hover: true,
         tooltipDelay: 120,
         selectable: true,
         navigationButtons: false,
+        hideEdgesOnDrag: isLarge,
       },
       nodes: {
         scaling: { min: 14, max: 30 },
       },
     };
 
-    const net = new Network(containerRef.current, { nodes: visNodes as any, edges: visEdges as any }, options as any);
+    const net = new Network(
+      containerRef.current,
+      { nodes: visNodes as any, edges: visEdges as any },
+      options as any
+    );
     networkRef.current = net;
+    setIsPhysicsActive(true);
+
+    // Auto-freeze physics once stabilized to drop CPU usage to 0%
+    net.once("stabilizationIterationsDone", () => {
+      net.setOptions({ physics: { enabled: false } });
+      setIsPhysicsActive(false);
+    });
 
     net.on("click", (params) => {
       if (params.nodes && params.nodes.length > 0) {
@@ -136,25 +172,67 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
       net.destroy();
       networkRef.current = null;
     };
-  }, [nodes, edges, selectedNodeId, onSelectNode]);
+  }, [nodes, edges, onSelectNode]);
 
-  const handleFit = () => (networkRef.current as any)?.fit({ animation: { duration: 500, easingFunction: "easeInOutQuad" } });
+  // Synchronize selection without recreating network
+  useEffect(() => {
+    if (!networkRef.current) return;
+    if (selectedNodeId) {
+      networkRef.current.selectNodes([selectedNodeId]);
+    } else {
+      networkRef.current.unselectAll();
+    }
+  }, [selectedNodeId]);
+
+  const handleFit = () =>
+    (networkRef.current as any)?.fit({
+      animation: { duration: 500, easingFunction: "easeInOutQuad" },
+    });
+
   const handleZoomIn = () => {
     if (!networkRef.current) return;
     const scale = networkRef.current.getScale();
-    (networkRef.current as any).moveTo({ scale: scale * 1.3, animation: { duration: 300, easingFunction: "easeInOutQuad" } });
+    (networkRef.current as any).moveTo({
+      scale: scale * 1.3,
+      animation: { duration: 300, easingFunction: "easeInOutQuad" },
+    });
   };
+
   const handleZoomOut = () => {
     if (!networkRef.current) return;
     const scale = networkRef.current.getScale();
-    (networkRef.current as any).moveTo({ scale: scale * 0.7, animation: { duration: 300, easingFunction: "easeInOutQuad" } });
+    (networkRef.current as any).moveTo({
+      scale: scale * 0.7,
+      animation: { duration: 300, easingFunction: "easeInOutQuad" },
+    });
   };
+
   const togglePhysics = () => {
     if (!networkRef.current) return;
     const next = !isPhysicsActive;
     networkRef.current.setOptions({ physics: { enabled: next } });
     setIsPhysicsActive(next);
   };
+
+  const focusNode = (nodeId: string) => {
+    if (!networkRef.current) return;
+    networkRef.current.selectNodes([nodeId]);
+    (networkRef.current as any).focus(nodeId, {
+      scale: 1.2,
+      animation: { duration: 500, easingFunction: "easeInOutQuad" },
+    });
+    onSelectNode(nodeId);
+    setIsSearching(false);
+    setSearchQuery("");
+  };
+
+  const searchResults = useMemo(() => {
+    if (!searchQuery.trim()) return [];
+    const q = searchQuery.toLowerCase();
+    return nodes
+      .filter((n) => n.label.toLowerCase().includes(q) || n.id.toLowerCase().includes(q))
+      .slice(0, 8);
+  }, [nodes, searchQuery]);
 
   return (
     <div className="relative w-full h-full bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-slate-900 via-slate-950 to-[#020617] overflow-hidden">
@@ -184,6 +262,59 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
             <Play className="w-4 h-4 text-slate-400" />
           )}
         </Button>
+      </div>
+
+      {/* Top Floating Search & Quick Focus */}
+      <div className="absolute top-3 right-3 sm:top-5 sm:right-5 z-20 flex flex-col items-end">
+        {!isSearching ? (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setIsSearching(true)}
+            className="h-8 gap-1.5 text-xs bg-slate-900/90 backdrop-blur border-slate-800 hover:bg-slate-800 text-slate-300 hover:text-white shadow-lg"
+          >
+            <Search className="w-3.5 h-3.5 text-indigo-400" />
+            <span>Tìm nút</span>
+          </Button>
+        ) : (
+          <div className="flex flex-col bg-slate-900/95 backdrop-blur border border-slate-800 rounded-xl p-1.5 shadow-2xl w-64 sm:w-72">
+            <div className="flex items-center gap-1.5 px-2 py-1 bg-slate-950/70 rounded-lg border border-slate-800/80">
+              <Search className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Tìm nút theo tên / id..."
+                autoFocus
+                className="bg-transparent text-xs text-white placeholder-slate-500 focus:outline-none w-full"
+              />
+              <button
+                onClick={() => {
+                  setIsSearching(false);
+                  setSearchQuery("");
+                }}
+                className="text-slate-400 hover:text-white p-0.5"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            {searchResults.length > 0 && (
+              <div className="mt-1 max-h-48 overflow-y-auto flex flex-col gap-0.5 divide-y divide-slate-800/50">
+                {searchResults.map((n) => (
+                  <button
+                    key={n.id}
+                    onClick={() => focusNode(n.id)}
+                    className="text-left px-2.5 py-1.5 text-xs rounded hover:bg-indigo-600/20 text-slate-200 hover:text-white transition flex flex-col"
+                  >
+                    <span className="font-medium truncate">{n.label}</span>
+                    <span className="text-[10px] text-slate-400 truncate">{n.id}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Floating Legend */}

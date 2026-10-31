@@ -9,7 +9,7 @@ import { jobs } from "../engine/jobs.js";
 import { initUsage, usageSummary } from "../engine/usage.js";
 import { activeTools } from "../tools/index.js";
 import { persistExtraction } from "../engine/persist.js";
-import { computeCentrality, filterHubNodes } from "../engine/pagerank.js";
+import { computeCentrality, filterHubNodes, NodeCentrality } from "../engine/pagerank.js";
 import { knowledgeExtractor } from "../engine/parsers/extractor.js";
 import { LevelOfDetail } from "../types.js";
 
@@ -184,6 +184,7 @@ export function startHttpServer(db?: DatabaseInstance) {
       const projectId = parsedUrl.searchParams.get("project_id");
       const lodParam = parseInt(parsedUrl.searchParams.get("lod") || "0", 10);
       const domainFilter = parsedUrl.searchParams.get("domain");
+      const centerNodeId = parsedUrl.searchParams.get("center_node");
 
       let nodes = projectId
         ? graphMemory.getProjectNodes(projectId)
@@ -199,15 +200,40 @@ export function startHttpServer(db?: DatabaseInstance) {
       }
 
       const totalNodesBeforeLOD = nodes.length;
+      let centrality: Map<string, NodeCentrality>;
 
-      // Apply Semantic Zoom (LOD)
-      if (lodParam === LevelOfDetail.LOD0_MACRO && nodes.length > 15) {
-        const filtered = filterHubNodes(nodes, edges, 15);
-        nodes = filtered.hubNodes;
-        edges = filtered.hubEdges;
+      if (centerNodeId && nodes.some((n) => n.id === centerNodeId)) {
+        // Ego network (neighborhood around centerNodeId)
+        const neighborIds = new Set<string>([centerNodeId]);
+        for (const e of edges) {
+          if (e.source_id === centerNodeId) neighborIds.add(e.target_id);
+          if (e.target_id === centerNodeId) neighborIds.add(e.source_id);
+        }
+        nodes = nodes.filter((n) => neighborIds.has(n.id));
+        const finalIds = new Set(nodes.map((n) => n.id));
+        edges = edges.filter((e) => finalIds.has(e.source_id) && finalIds.has(e.target_id));
+        centrality = computeCentrality(nodes, edges);
+      } else {
+        // Apply Semantic Zoom (LOD)
+        let topK = 0;
+        if (lodParam === LevelOfDetail.LOD0_MACRO && nodes.length > 25) {
+          topK = 25;
+        } else if (lodParam === LevelOfDetail.LOD1_MESO && nodes.length > 80) {
+          topK = 80;
+        } else if (lodParam === LevelOfDetail.LOD2_MICRO && nodes.length > 250) {
+          topK = 250;
+        }
+
+        if (topK > 0) {
+          const filtered = filterHubNodes(nodes, edges, topK);
+          nodes = filtered.hubNodes;
+          edges = filtered.hubEdges;
+          centrality = filtered.centrality;
+        } else {
+          centrality = computeCentrality(nodes, edges);
+        }
       }
 
-      const centrality = computeCentrality(nodes, edges);
       const nodesWithScore = nodes.map((n) => ({
         ...n,
         centralityScore: centrality.get(n.id)?.score || 0,

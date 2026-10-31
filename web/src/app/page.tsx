@@ -30,7 +30,11 @@ export default function KnowledgeStudioPage() {
   const [activeTab, setActiveTab] = useState<"graph" | "ingest" | "gaps" | "provenance" | "telemetry">("graph");
   const [projects, setProjects] = useState<string[]>([]);
   const [selectedProject, setSelectedProject] = useState<string>("");
-  const [lod, setLod] = useState<number>(1);
+  const [lod, setLod] = useState<number>(0);
+  const [graphStats, setGraphStats] = useState<{ totalNodes: number; renderedNodes: number }>({
+    totalNodes: 0,
+    renderedNodes: 0,
+  });
   const [nodes, setNodes] = useState<GraphNode[]>([]);
   const [edges, setEdges] = useState<GraphEdge[]>([]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -65,6 +69,7 @@ export default function KnowledgeStudioPage() {
     if (!selectedProject) {
       setNodes([]);
       setEdges([]);
+      setGraphStats({ totalNodes: 0, renderedNodes: 0 });
       return;
     }
     try {
@@ -73,6 +78,10 @@ export default function KnowledgeStudioPage() {
       const data = await res.json();
       setNodes(data.nodes || []);
       setEdges(data.edges || []);
+      setGraphStats({
+        totalNodes: data.totalNodes || 0,
+        renderedNodes: data.renderedNodes || (data.nodes ? data.nodes.length : 0),
+      });
     } catch (err) {
       console.error("Failed to load graph", err);
     }
@@ -243,7 +252,7 @@ export default function KnowledgeStudioPage() {
           </Button>
 
           {/* LOD Selector */}
-          <div className="flex items-center gap-1.5 text-xs text-slate-300 bg-slate-800/80 px-3 py-1.5 rounded-lg border border-slate-700/60">
+          <div className="flex items-center gap-1.5 text-xs text-slate-300 bg-slate-800/80 px-2.5 py-1.5 rounded-lg border border-slate-700/60">
             <ZoomIn className="w-3.5 h-3.5 text-purple-400" />
             <select
               value={lod}
@@ -251,13 +260,26 @@ export default function KnowledgeStudioPage() {
               className="bg-transparent text-white font-medium focus:outline-none cursor-pointer text-xs"
             >
               <option value={0} className="bg-slate-800">
-                LOD 0: Vĩ mô
+                LOD 0: Vĩ mô (Top 25)
               </option>
               <option value={1} className="bg-slate-800">
-                LOD 1: Chi tiết
+                LOD 1: Trung mô (Top 80)
+              </option>
+              <option value={2} className="bg-slate-800">
+                LOD 2: Chi tiết (Top 250)
               </option>
             </select>
           </div>
+
+          {/* Node count stats badge */}
+          {graphStats.totalNodes > 0 && (
+            <span
+              className="hidden lg:inline-flex items-center px-2 py-1 rounded text-[11px] bg-slate-800/60 text-slate-400 border border-slate-700/50 font-mono"
+              title="Số nút đang hiển thị / Tổng số nút trong dự án"
+            >
+              {graphStats.renderedNodes}/{graphStats.totalNodes} nút
+            </span>
+          )}
 
           {/* Refresh Button */}
           <Button
