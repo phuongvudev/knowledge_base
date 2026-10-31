@@ -1,0 +1,41 @@
+{
+  "name": "local-knowledge-base",
+  "version": "1.0.0",
+  "description": "Local Neural Knowledge Graph & Knowledge Platform via MCP",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "knowledge-base": "./dist/index.js",
+    "knowledge-base-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc && cd web && npm run build",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "web": "tsx src/server/runner.ts",
+    "web:server": "tsx src/server/http.ts",
+    "web:ui": "cd web && npm run dev",
+    "benchmark": "tsx src/benchmark.ts",
+    "test": "tsx src/selftest.ts",
+    "ab": "tsx src/ab_bench.ts",
+    "setup": "tsx src/cli/installer.ts all",
+    "install:claude": "tsx src/cli/installer.ts claude",
+    "install:cursor": "tsx src/cli/installer.ts cursor",
+    "install:cline": "tsx src/cli/installer.ts cline",
+    "install:windsurf": "tsx src/cli/installer.ts windsurf",
+    "install:antigravity": "tsx src/cli/installer.ts antigravity",
+    "install:all": "tsx src/cli/installer.ts all"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.6.1",
+    "mammoth": "^1.9.0",
+    "pdf-parse": "^1.1.1",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "@types/pdf-parse": "^1.1.4",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}

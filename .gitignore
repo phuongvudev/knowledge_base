@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+web/node_modules/
+
+# Production / Build outputs
+dist/
+.next/
+web/.next/
+web/out/
+build/
+*.tsbuildinfo
+
+# Database & Runtime data
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/uploads/*
+!data/uploads/.gitkeep
+
+# Environment files
+.env*
+!.env.example
+
+# Logs & System files
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
+*.bak

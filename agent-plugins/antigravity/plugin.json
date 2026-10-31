@@ -1,0 +1,9 @@
+{
+  "name": "knowledge-base",
+  "description": "Local Neural Knowledge Graph with SQLite FTS5 for instant architecture discovery, document extraction (PDF/DOCX), impact analysis, and token compression.",
+  "suggestedPrompts": [
+    "Show me the neural graph overview for project",
+    "Explore the impact if I modify this service",
+    "Audit my project knowledge base for missing data"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "knowledge-base": {
+      "command": "node",
+      "args": [
+        "/Volumes/Data/station/personal/projects/knowledge_base/dist/index.js"
+      ],
+      "env": {
+        "KB_DB_PATH": "/Volumes/Data/station/personal/projects/knowledge_base/data/neural_knowledge.db"
+      }
+    }
+  }
+}
