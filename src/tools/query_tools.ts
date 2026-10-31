@@ -17,22 +17,57 @@ const STOPWORDS = new Set([
 
 // Vietnamese phrases -> the English words code is written in (longest phrases first); "" drops filler
 const VI_EN: Array<[RegExp, string]> = [
-  [/ứng dụng|người dùng/giu, ""], [/ghi nhớ|lưu trữ|lưu lại|\blưu\b/giu, "store save persist remember"],
-  [/đồng ý|chấp nhận|cho phép/giu, "consent accept allow"], [/dữ liệu/giu, "data"], [/\bgửi\b/giu, "send upload"],
-  [/xác thực|đăng nhập/giu, "auth login"], [/thông báo/giu, "notification"], [/hóa đơn|biên lai/giu, "receipt invoice"],
-  [/ngân sách/giu, "budget"], [/giao dịch/giu, "transaction"], [/tài khoản/giu, "account"], [/số dư/giu, "balance"],
-  [/thử lại/giu, "retry"], [/mã hóa/giu, "encrypt"], [/bảo mật/giu, "security secret"], [/\blỗi\b/giu, "error exception"],
-  [/cấu hình/giu, "config settings"], [/đồng bộ/giu, "sync"], [/xóa/giu, "delete remove"], [/tìm kiếm/giu, "search"],
+  [/ứng dụng|người dùng/giu, ""],
+  [/ghi nhớ|lưu trữ|lưu lại|\blưu\b/giu, "store save persist remember"],
+  [/đồng ý|chấp nhận|cho phép/giu, "consent accept allow"],
+  [/dữ liệu/giu, "data"],
+  [/\bgửi\b/giu, "send upload"],
+  [/xác thực|đăng nhập/giu, "auth login authenticate"],
+  [/đăng xuất/giu, "logout signout"],
+  [/thông báo/giu, "notification notify alert"],
+  [/hóa đơn|biên lai/giu, "receipt invoice bill"],
+  [/ngân sách/giu, "budget"],
+  [/giao dịch/giu, "transaction transfer payment"],
+  [/tài khoản/giu, "account"],
+  [/số dư/giu, "balance remaining"],
+  [/chi tiêu|chi phí|khoản chi|\bchi\b/giu, "expense expenditure cost spend payout"],
+  [/thu nhập|khoản thu|\bthu\b/giu, "income revenue earn"],
+  [/danh mục|phân loại|\bloại\b/giu, "category classification type group"],
+  [/tiền tệ|tiền|tiền mặt/giu, "currency money cash amount"],
+  [/ví tiền|\bví\b/giu, "wallet balance purse"],
+  [/tiết kiệm|mục tiêu/giu, "saving savings goal target"],
+  [/khoản nợ|vay nợ|\bnợ\b/giu, "debt loan credit borrow lend liability"],
+  [/định kỳ|lặp lại|chu kỳ/giu, "recurring periodic repeat interval schedule"],
+  [/tính tổng|tổng cộng|\btổng\b/giu, "total sum calculate aggregate summary"],
+  [/báo cáo|thống kê/giu, "report statistics analytics chart"],
+  [/kho dữ liệu|kho lưu trữ|\bkho\b/giu, "repository repo store dao"],
+  [/điều hướng|chuyển màn hình/giu, "router route navigation navigate"],
+  [/xử lý|thực thi/giu, "handle handler process execute dispatch"],
+  [/thực thể|mô hình dữ liệu/giu, "entity model schema dto"],
+  [/trạng thái/giu, "status state flag condition"],
+  [/thời gian|ngày tháng|hạn chót/giu, "date time timestamp deadline due"],
+  [/ngân hàng/giu, "bank banking statement"],
+  [/thử lại/giu, "retry"],
+  [/mã hóa/giu, "encrypt encryption crypto"],
+  [/bảo mật/giu, "security secret token password"],
+  [/\blỗi\b|ngoại lệ/giu, "error exception failure fault"],
+  [/cấu hình|thiết lập/giu, "config configuration settings setup"],
+  [/đồng bộ/giu, "sync synchronize refresh"],
+  [/xóa|hủy bỏ/giu, "delete remove discard cancel"],
+  [/tìm kiếm|tra cứu/giu, "search query find lookup filter"],
+  [/lọc|sắp xếp/giu, "filter sort order query"],
 ];
 // Everyday words -> the terms code usually names them with; only used when the exact words found nothing
 const SYNONYMS: Array<[RegExp, string]> = [
   [/\b(allowed|allowlist|whitelist|permitted|blocked|forbidden)\b/i, "policy check validate reject"],
-  [/\b(servers?|calling|outbound)\b/i, "endpoint url request"],
-  [/\b(remember|persist|saved?)\b/i, "store prefs"],
-  [/\b(credential|password|token)\b/i, "secret key"],
-  [/\b(wait|longer)\b/i, "backoff delay"],
-  [/\b(consent|agreed?)\b/i, "accepted accept"],
-  [/\b(shop|store|vendor|seller)\b/i, "merchant"],
+  [/\b(servers?|calling|outbound)\b/i, "endpoint url request client api"],
+  [/\b(remember|persist|saved?)\b/i, "store prefs localstorage db"],
+  [/\b(credential|password|token)\b/i, "secret key auth jwt"],
+  [/\b(wait|longer)\b/i, "backoff delay timeout debounce"],
+  [/\b(consent|agreed?)\b/i, "accepted accept terms permission"],
+  [/\b(shop|store|vendor|seller)\b/i, "merchant partner payee"],
+  [/\b(calc|calculate|calculation|sum)\b/i, "compute total aggregate balance"],
+  [/\b(error|fail|failed|failure)\b/i, "exception reject catch fault"],
 ];
 
 // "path:line" an agent can open directly
@@ -86,6 +121,29 @@ export async function handleQueryTool(
       lines.push(`- **Properties:** \`${JSON.stringify(node.properties)}\``);
     }
 
+    // 360-degree Call Graph & Dependencies
+    const sub = graphMemory.getRadialSubgraph(node_id, 1, 15);
+    const outbound = sub.edges.filter((e) => e.source_id === node_id);
+    const inbound = sub.edges.filter((e) => e.target_id === node_id);
+
+    if (outbound.length > 0) {
+      lines.push("");
+      lines.push("#### Outbound Dependencies (Calls/Uses):");
+      for (const e of outbound.slice(0, 8)) {
+        lines.push(`- -[${e.relation_type}]-> \`${e.target_id}\``);
+      }
+      if (outbound.length > 8) lines.push(`+${outbound.length - 8} more outbound links`);
+    }
+
+    if (inbound.length > 0) {
+      lines.push("");
+      lines.push("#### Inbound References (Called by):");
+      for (const e of inbound.slice(0, 8)) {
+        lines.push(`- <-[${e.relation_type}]- \`${e.source_id}\``);
+      }
+      if (inbound.length > 8) lines.push(`+${inbound.length - 8} more inbound links`);
+    }
+
     let rawTextEquivalent = node.summary;
 
     if (include_raw) {
@@ -98,7 +156,18 @@ export async function handleQueryTool(
         if (prov.section_title) lines.push(`- **Section:** ${prov.section_title}`);
         lines.push("");
         lines.push("```text");
-        lines.push(prov.content ? prov.content.slice(0, 1000) : "No raw content stored.");
+        if (prov.content) {
+          if (node.properties?.line) {
+            const fileLines = prov.content.split("\n");
+            const startLine = Math.max(1, node.properties.line - 3);
+            const endLine = Math.min(fileLines.length, startLine + 30);
+            lines.push(fileLines.slice(startLine - 1, endLine).join("\n"));
+          } else {
+            lines.push(prov.content.slice(0, 1000));
+          }
+        } else {
+          lines.push("No raw content stored.");
+        }
         lines.push("```");
         rawTextEquivalent = prov.content || "";
       }
@@ -209,6 +278,43 @@ export async function handleQueryTool(
     const lines: string[] = [`Search "${query}" (${results.length} matches)`];
     if (results.length === 0) {
       lines.push("No matches found in knowledge graph.");
+
+      // Multi-layer search fallback: search raw source contents directly
+      try {
+        const rawMatch = tokens.map((t) => `"${t}"*`).join(" ");
+        const rawRows = (project_id
+          ? db.prepare(`
+              SELECT r.id, r.title, r.file_path, r.content
+              FROM raw_sources r
+              JOIN raw_sources_fts f ON r.id = f.rowid
+              WHERE raw_sources_fts MATCH ? AND r.project_id = ?
+              LIMIT 4
+            `).all(rawMatch, project_id)
+          : db.prepare(`
+              SELECT r.id, r.title, r.file_path, r.content
+              FROM raw_sources r
+              JOIN raw_sources_fts f ON r.id = f.rowid
+              WHERE raw_sources_fts MATCH ?
+              LIMIT 4
+            `).all(rawMatch)
+        ) as any[];
+
+        if (rawRows.length > 0) {
+          lines.push(`\n📄 Exact symbols not found, but matched in raw sources (${rawRows.length} files):`);
+          for (const row of rawRows) {
+            const fileLines = row.content.split("\n");
+            const firstToken = tokens[0].toLowerCase();
+            const hitIndex = fileLines.findIndex((l: string) => l.toLowerCase().includes(firstToken));
+            const lineNum = hitIndex >= 0 ? hitIndex + 1 : 1;
+            const snippet = fileLines.slice(Math.max(0, lineNum - 2), Math.min(fileLines.length, lineNum + 3)).join("\n");
+            lines.push(`- \`${row.file_path || row.title}\`:${lineNum}`);
+            lines.push("```\n" + snippet + "\n```");
+          }
+        }
+      } catch {
+        // ignore raw search match syntax errors
+      }
+
       if (project_id) {
         const unindexed = listDeps(db, project_id).filter((d) => d.source && !d.indexedAs);
         const qTokens = query.toLowerCase().split(/[\s:_/.-]+/).filter((t) => t.length >= 3);
