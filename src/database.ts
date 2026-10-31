@@ -88,23 +88,6 @@ export function initDatabase(dbPath?: string): DatabaseInstance {
     );
     CREATE INDEX IF NOT EXISTS idx_lexicon_project ON project_lexicon(project_id);
 
-    -- Auto-seed domain lexicon for budgetable-v2 (scoped to its project_id only)
-    INSERT OR IGNORE INTO project_lexicon (project_id, term, synonyms) VALUES
-      ('budgetable-v2', 'chi tiêu', 'expense expenditure cost spend payout'),
-      ('budgetable-v2', 'khoản chi', 'expense expenditure cost spend payout'),
-      ('budgetable-v2', 'thu nhập', 'income revenue earn'),
-      ('budgetable-v2', 'khoản thu', 'income revenue earn'),
-      ('budgetable-v2', 'ngân sách', 'budget'),
-      ('budgetable-v2', 'giao dịch', 'transaction transfer payment'),
-      ('budgetable-v2', 'tài khoản', 'account'),
-      ('budgetable-v2', 'số dư', 'balance remaining'),
-      ('budgetable-v2', 'ví tiền', 'wallet balance purse'),
-      ('budgetable-v2', 'tiết kiệm', 'saving savings goal target'),
-      ('budgetable-v2', 'khoản nợ', 'debt loan credit borrow lend liability'),
-      ('budgetable-v2', 'định kỳ', 'recurring periodic repeat interval schedule'),
-      ('budgetable-v2', 'ngân hàng', 'bank banking statement'),
-      ('budgetable-v2', 'danh mục', 'category classification type group');
-
     -- Auto-seed existing distinct project_ids
     INSERT OR IGNORE INTO projects (id, name, description, domain)
     SELECT DISTINCT project_id, project_id, 'Dự án đã nạp', 'general'
