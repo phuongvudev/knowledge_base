@@ -124,6 +124,10 @@ export class CodeParser {
       this.parseSQL(fileName, content, entities);
     } else if (ext === ".json") {
       this.parseJSON(fileName, content, entities);
+    } else if (ext === ".yaml" || ext === ".yml") {
+      this.parseYAML(fileName, content, entities);
+    } else if (fileName.toLowerCase() === "dockerfile" || ext === ".dockerfile") {
+      this.parseDockerfile(fileName, content, entities);
     } else {
       // Fallback generic code parser
       entities.push({
@@ -420,19 +424,160 @@ export class CodeParser {
     content: string,
     out: ParsedCodeEntity[]
   ): void {
-    const tableRegex = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_]+)/gi;
+    const tableBlockRegex = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_`"\[\]]+)\s*\(([\s\S]*?)\)(?:;|\n\s*GO|\n\s*CREATE|$)/gi;
     let match;
-    while ((match = tableRegex.exec(content)) !== null) {
-      const tableName = match[1];
+    let found = 0;
+
+    while ((match = tableBlockRegex.exec(content)) !== null) {
+      found++;
+      const rawName = match[1].replace(/[`"\[\]]/g, "");
+      const body = match[2];
+
+      const lines = body.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("--"));
+      const cols: string[] = [];
+      const dependsOn: string[] = [];
+
+      for (const line of lines) {
+        const fkMatch = line.match(/(?:FOREIGN\s+KEY.*?)?REFERENCES\s+([A-Za-z0-9_`"\[\]]+)/i);
+        if (fkMatch) {
+          const refTable = fkMatch[1].replace(/[`"\[\]]/g, "");
+          if (refTable && refTable !== rawName && !dependsOn.includes(refTable)) {
+            dependsOn.push(refTable);
+          }
+        }
+
+        const colMatch = line.match(/^([A-Za-z0-9_`"\[\]]+)\s+([A-Za-z0-9_()]+)/);
+        if (
+          colMatch &&
+          !/^(PRIMARY|FOREIGN|CONSTRAINT|UNIQUE|CHECK|KEY|INDEX)$/i.test(colMatch[1])
+        ) {
+          cols.push(colMatch[1].replace(/[`"\[\]]/g, ""));
+        }
+      }
+
+      const summaryCols = cols.length
+        ? `columns: ${cols.slice(0, 8).join(", ")}${cols.length > 8 ? ` (+${cols.length - 8} more)` : ""}`
+        : "";
+      const summaryFk = dependsOn.length ? ` -> references ${dependsOn.join(", ")}` : "";
+
       out.push({
-        name: tableName,
+        name: rawName,
         kind: "data_model",
-        summary: `Database table '${tableName}' defined in ${fileName}.sql`,
+        summary: `Table '${rawName}' in ${fileName}.sql${summaryCols ? ` (${summaryCols})` : ""}${summaryFk}`,
         calls: [],
-        dependsOn: [],
+        dependsOn,
         storesIn: [],
       });
     }
+
+    if (found === 0) {
+      const tableRegex = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_`"\[\]]+)/gi;
+      let m;
+      while ((m = tableRegex.exec(content)) !== null) {
+        const tableName = m[1].replace(/[`"\[\]]/g, "");
+        out.push({
+          name: tableName,
+          kind: "data_model",
+          summary: `Database table '${tableName}' defined in ${fileName}.sql`,
+          calls: [],
+          dependsOn: [],
+          storesIn: [],
+        });
+      }
+    }
+  }
+
+  private parseYAML(
+    fileName: string,
+    content: string,
+    out: ParsedCodeEntity[]
+  ): void {
+    if (fileName.includes("docker-compose") || content.includes("services:")) {
+      const lines = content.split("\n");
+      let inServices = false;
+      let baseIndent = 0;
+      let serviceIndent = -1;
+      let currentService: { name: string; image?: string; ports: string[]; dependsOn: string[] } | null = null;
+
+      const finishService = () => {
+        if (currentService) {
+          out.push({
+            name: currentService.name,
+            kind: "service",
+            summary: `Container Service '${currentService.name}'${currentService.image ? ` (image: ${currentService.image})` : ""}${currentService.ports.length ? ` [ports: ${currentService.ports.join(", ")}]` : ""}`,
+            calls: [],
+            dependsOn: currentService.dependsOn,
+            storesIn: [],
+          });
+          currentService = null;
+        }
+      };
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith("#")) continue;
+
+        if (/^services:\s*$/i.test(trimmed)) {
+          finishService();
+          inServices = true;
+          baseIndent = line.search(/\S/);
+          serviceIndent = -1;
+          continue;
+        }
+
+        if (inServices) {
+          const indent = line.search(/\S/);
+          if (indent <= baseIndent && /^[a-z0-9_-]+:/i.test(trimmed)) {
+            finishService();
+            inServices = false;
+            continue;
+          }
+
+          const svcMatch = trimmed.match(/^([A-Za-z0-9_-]+):\s*$/);
+          if (svcMatch) {
+            if (serviceIndent === -1 && indent > baseIndent) {
+              serviceIndent = indent;
+            }
+            if (indent === serviceIndent) {
+              finishService();
+              currentService = { name: svcMatch[1], ports: [], dependsOn: [] };
+              continue;
+            }
+          }
+
+          if (currentService) {
+            const imgMatch = trimmed.match(/^image:\s*(.+)$/i);
+            if (imgMatch) currentService.image = imgMatch[1].trim().replace(/['"]/g, "");
+
+            const depMatch = trimmed.match(/^-\s+([A-Za-z0-9_-]+)$/);
+            if (depMatch && /depends_on/i.test(lines[i - 1] || "")) {
+              currentService.dependsOn.push(depMatch[1]);
+            }
+          }
+        }
+      }
+
+      finishService();
+    }
+  }
+
+  private parseDockerfile(
+    fileName: string,
+    content: string,
+    out: ParsedCodeEntity[]
+  ): void {
+    const fromMatch = content.match(/^FROM\s+([^\s\n]+)/im);
+    const exposeMatches = [...content.matchAll(/^EXPOSE\s+([^\s\n]+)/gim)].map((m) => m[1]);
+
+    out.push({
+      name: fileName || "Dockerfile",
+      kind: "config",
+      summary: `Container build recipe${fromMatch ? ` based on ${fromMatch[1]}` : ""}${exposeMatches.length ? ` exposing port(s) ${exposeMatches.join(", ")}` : ""}`,
+      calls: [],
+      dependsOn: [],
+      storesIn: [],
+    });
   }
 
   private parseJSON(

@@ -436,7 +436,7 @@ await run("MCP end-to-end over stdio: every call is recorded, incl. errors", asy
     env: { ...(process.env as Record<string, string>), KB_DB_PATH: dbFile, KB_TOOLSET: "read" },
     stderr: "ignore",
   }));
-  assert.equal((await ro.listTools()).tools.length, 10);
+  assert.equal((await ro.listTools()).tools.length, 11);
   const denied: any = await ro.callTool({ name: "kb_add_node", arguments: { project_id: "x", id: "a", label: "a", node_type: "rule", summary: "s" } });
   assert.equal(denied.isError, true, "write tool must be refused in read toolset");
   await ro.close();
@@ -456,8 +456,8 @@ await run("token budget: schema, footer, outline, search stay small", async () =
   process.env.KB_TOOLSET = "read";
   const read = activeTools();
   delete process.env.KB_TOOLSET;
-  assert.ok(read.length === 10 && read.every((t) => t.annotations?.readOnlyHint), "read toolset is read-only tools");
-  assert.ok(tok(read) <= 900, `read schema ${tok(read)} tokens`);
+  assert.ok(read.length === 11 && read.every((t) => t.annotations?.readOnlyHint), "read toolset is read-only tools");
+  assert.ok(tok(read) <= 1000, `read schema ${tok(read)} tokens`);
 
   const { footer } = telemetry.record("t", process.hrtime.bigint(), null, null, "x", "x");
   assert.equal(footer, "", "no telemetry footer unless KB_TELEMETRY_FOOTER=1");
@@ -570,6 +570,77 @@ await run("startup prunes old logs", async () => {
   for (let i = 0; i < 600; i++) ins.run();
   initDatabase(); // same file, runs schema + prune
   assert.ok((db.prepare("SELECT COUNT(*) c FROM ingest_jobs").get() as any).c <= 500);
+});
+
+await run("diagnostics: circular dependencies and dead code detection", async () => {
+  const { auditArchitecture } = await import("./engine/diagnostics.js");
+  const testNodes: any[] = [
+    { id: "mod:a", label: "A", node_type: "module", summary: "A", is_hub: false },
+    { id: "mod:b", label: "B", node_type: "module", summary: "B", is_hub: false },
+    { id: "mod:c", label: "C", node_type: "module", summary: "C", is_hub: false },
+    { id: "orphan:dead", label: "DeadCode", node_type: "component", summary: "Unused", is_hub: false },
+  ];
+  const testEdges: any[] = [
+    { source_id: "mod:a", target_id: "mod:b", relation_type: "DEPENDS_ON" },
+    { source_id: "mod:b", target_id: "mod:c", relation_type: "DEPENDS_ON" },
+    { source_id: "mod:c", target_id: "mod:a", relation_type: "DEPENDS_ON" }, // Cycle!
+  ];
+  const report = auditArchitecture("test-p", testNodes, testEdges);
+  assert.equal(report.summary.cycleCount, 1, "detects A -> B -> C -> A cycle");
+  assert.equal(report.cycles[0].cycleLength, 3);
+  assert.equal(report.summary.orphanCount, 1, "detects orphan node with inDegree = 0");
+  assert.ok(report.healthScore < 100, "health score penalizes smells");
+});
+
+await run("parsers: SQL DDL foreign keys and docker-compose services", async () => {
+  const { codeParser } = await import("./engine/parsers/code_parser.js");
+
+  const sqlContent = `
+    CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(100));
+    CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, amount DECIMAL, CONSTRAINT fk_u FOREIGN KEY (user_id) REFERENCES users(id));
+  `;
+  const sqlEntities = codeParser.parseFile("schema.sql", sqlContent);
+  assert.equal(sqlEntities.length, 2);
+  const orders = sqlEntities.find((e) => e.name === "orders");
+  assert.ok(orders, "orders table parsed");
+  assert.deepEqual(orders?.dependsOn, ["users"], "orders references users table");
+
+  const composeContent = `
+    version: '3'
+    services:
+      web:
+        image: nginx:latest
+        ports:
+          - "80:80"
+        depends_on:
+          - db
+      db:
+        image: postgres:15
+  `;
+  const yamlEntities = codeParser.parseFile("docker-compose.yml", composeContent);
+  assert.equal(yamlEntities.length, 2);
+  const webSvc = yamlEntities.find((e) => e.name === "web");
+  assert.deepEqual(webSvc?.dependsOn, ["db"], "web container service depends on db");
+});
+
+await run("visualizer: Obsidian Canvas and Markdown Report exports", async () => {
+  const { visualizer } = await import("./engine/visualizer.js");
+  const testNodes: any[] = [
+    { id: "s:auth", label: "Auth", node_type: "service", summary: "Auth service", is_hub: true },
+    { id: "s:db", label: "DB", node_type: "database", summary: "Database", is_hub: false },
+  ];
+  const testEdges: any[] = [
+    { source_id: "s:auth", target_id: "s:db", relation_type: "DEPENDS_ON" },
+  ];
+  const canvasJson = JSON.parse(visualizer.renderObsidianCanvas(testNodes, testEdges));
+  assert.equal(canvasJson.nodes.length, 2);
+  assert.equal(canvasJson.edges.length, 1);
+  assert.equal(canvasJson.edges[0].fromNode, "s:auth");
+
+  const mdReport = visualizer.renderMarkdownReport("test-p", "Test Project", testNodes, testEdges);
+  assert.ok(mdReport.includes("Architecture Documentation: Test Project"));
+  assert.ok(mdReport.includes("Total Components / Nodes:** 2"));
+  assert.ok(mdReport.includes("```mermaid"));
 });
 
 server.close();

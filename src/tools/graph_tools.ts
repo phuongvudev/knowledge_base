@@ -3,7 +3,9 @@ import { linkedProjects } from "../engine/deps.js";
 import { graphMemory } from "../engine/graph_memory.js";
 import { visualizer } from "../engine/visualizer.js";
 import { telemetry } from "../engine/telemetry.js";
+import { auditArchitecture } from "../engine/diagnostics.js";
 import {
+  AuditArchitectureSchema,
   CreateProjectSchema,
   GraphExploreSchema,
   GraphImpactSchema,
@@ -247,6 +249,43 @@ export async function handleGraphTool(
     return {
       content: [{ type: "text", text: rendered + footer }],
     };
+  }
+
+  if (name === "kb_audit_architecture") {
+    const { project_id } = AuditArchitectureSchema.parse(args);
+    const nodes = graphMemory.getProjectNodes(project_id);
+    const edges = graphMemory.getProjectEdges(project_id);
+    const report = auditArchitecture(project_id, nodes, edges);
+
+    const lines = [
+      `### Architecture Health Audit: **${project_id}**`,
+      `- **Health Score:** ${report.healthScore}/100 [${report.summary.status.toUpperCase()}]`,
+      `- **Components:** ${report.totalNodes} nodes, ${report.totalEdges} relationships`,
+      `- **Circular Dependencies:** ${report.summary.cycleCount}`,
+      `- **Orphan Components:** ${report.summary.orphanCount}`,
+      "",
+    ];
+
+    if (report.cycles.length > 0) {
+      lines.push("**Circular Dependencies Detected:**");
+      for (const c of report.cycles.slice(0, 5)) {
+        lines.push(`- Cycle (length ${c.cycleLength}): \`${c.path.join(" -> ")}\``);
+      }
+      if (report.cycles.length > 5) lines.push(`+${report.cycles.length - 5} more cycles`);
+      lines.push("");
+    }
+
+    if (report.orphanNodes.length > 0) {
+      lines.push("**Potential Orphan / Dead Components:**");
+      for (const o of report.orphanNodes.slice(0, 8)) {
+        lines.push(`- \`${o.id}\` [${o.node_type}] ${o.label}${o.file_path ? ` (${o.file_path})` : ""}`);
+      }
+      if (report.orphanNodes.length > 8) lines.push(`+${report.orphanNodes.length - 8} more orphans`);
+    }
+
+    const rendered = lines.join("\n");
+    const { footer } = telemetry.record(name, startTime, null, null, rendered, report.project_id);
+    return { content: [{ type: "text", text: rendered + footer }] };
   }
 
   return null;

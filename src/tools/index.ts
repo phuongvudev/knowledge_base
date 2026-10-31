@@ -363,10 +363,34 @@ export const ALL_TOOLS: Tool[] = [
       },
     },
   },
+  {
+    name: "kb_audit_architecture",
+    description:
+      "Health audit: circular dependencies, orphan code, health score (0-100).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_id: { type: "string", description: "Project slug to audit" },
+      },
+      required: ["project_id"],
+    },
+  },
 ];
 
 // Read-only tools can be auto-approved by MCP clients
-export const READ_ONLY_TOOLS = new Set(["kb_classify_document", "kb_project_list", "kb_graph_overview", "kb_graph_explore", "kb_graph_impact", "kb_audit_gaps", "kb_node_get", "kb_search", "kb_file_outline", "kb_stats"]);
+export const READ_ONLY_TOOLS = new Set([
+  "kb_classify_document",
+  "kb_project_list",
+  "kb_graph_overview",
+  "kb_graph_explore",
+  "kb_graph_impact",
+  "kb_audit_gaps",
+  "kb_node_get",
+  "kb_search",
+  "kb_file_outline",
+  "kb_stats",
+  "kb_audit_architecture",
+]);
 for (const tool of ALL_TOOLS) {
   tool.annotations = { ...tool.annotations, readOnlyHint: READ_ONLY_TOOLS.has(tool.name) };
 }

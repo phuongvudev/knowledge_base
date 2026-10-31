@@ -12,6 +12,7 @@
     "build": "tsc && cd web && npm run build",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
+    "watch": "tsx src/engine/watcher.ts",
     "web": "tsx src/server/runner.ts",
     "web:server": "tsx src/server/http.ts",
     "web:ui": "cd web && npm run dev",

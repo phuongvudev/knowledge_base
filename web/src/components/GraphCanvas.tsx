@@ -2,8 +2,9 @@
 
 import React, { useEffect, useRef, useState, useMemo } from "react";
 import { Network } from "vis-network";
-import { Maximize2, ZoomIn, ZoomOut, Play, Pause, Search, X } from "lucide-react";
+import { Maximize2, ZoomIn, ZoomOut, Play, Pause, Search, X, Download, Image, FileCode, FileText } from "lucide-react";
 import { Button } from "./ui/button";
+import { apiUrl } from "@/lib/api";
 
 export interface GraphNode {
   id: string;
@@ -14,6 +15,7 @@ export interface GraphNode {
   domain: string;
   is_hub: boolean;
   centralityScore?: number;
+  properties?: Record<string, any>;
 }
 
 export interface GraphEdge {
@@ -29,6 +31,7 @@ interface GraphCanvasProps {
   edges: GraphEdge[];
   onSelectNode: (nodeId: string) => void;
   selectedNodeId?: string | null;
+  projectId?: string;
 }
 
 const TYPE_COLORS: Record<string, { bg: string; border: string }> = {
@@ -49,12 +52,14 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
   edges,
   onSelectNode,
   selectedNodeId,
+  projectId,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const networkRef = useRef<Network | null>(null);
   const [isPhysicsActive, setIsPhysicsActive] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [isSearching, setIsSearching] = useState(false);
+  const [isExportOpen, setIsExportOpen] = useState(false);
 
   // Initialize or update network when nodes or edges change
   useEffect(() => {
@@ -226,6 +231,24 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
     setSearchQuery("");
   };
 
+  const handleExportPng = () => {
+    if (!containerRef.current) return;
+    const canvas = containerRef.current.querySelector("canvas");
+    if (!canvas) return;
+    const url = canvas.toDataURL("image/png");
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${projectId || "neural-knowledge"}-topology.png`;
+    a.click();
+    setIsExportOpen(false);
+  };
+
+  const handleDownload = (format: "canvas" | "report" | "mermaid") => {
+    if (!projectId) return;
+    window.open(apiUrl(`/api/export?project_id=${encodeURIComponent(projectId)}&format=${format}`), "_blank");
+    setIsExportOpen(false);
+  };
+
   const searchResults = useMemo(() => {
     if (!searchQuery.trim()) return [];
     const q = searchQuery.toLowerCase();
@@ -262,6 +285,54 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
             <Play className="w-4 h-4 text-slate-400" />
           )}
         </Button>
+        <div className="w-[1px] h-4 bg-slate-800 mx-0.5" />
+        <div className="relative">
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => setIsExportOpen(!isExportOpen)}
+            title="Xuất sơ đồ & tài liệu kiến trúc"
+            className={isExportOpen ? "text-indigo-400 bg-slate-800" : "text-slate-300"}
+          >
+            <Download className="w-4 h-4" />
+          </Button>
+
+          {isExportOpen && (
+            <div className="absolute bottom-full right-0 mb-2 w-56 bg-slate-900/95 backdrop-blur border border-slate-800 rounded-xl p-1.5 shadow-2xl flex flex-col gap-1 z-30">
+              <span className="px-2.5 py-1 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                Xuất sơ đồ & báo cáo
+              </span>
+              <button
+                onClick={handleExportPng}
+                className="flex items-center gap-2 px-2.5 py-1.5 text-xs text-slate-200 hover:text-white hover:bg-slate-800 rounded-lg transition"
+              >
+                <Image className="w-3.5 h-3.5 text-blue-400" />
+                <span>Tải ảnh PNG sơ đồ</span>
+              </button>
+              <button
+                onClick={() => handleDownload("canvas")}
+                className="flex items-center gap-2 px-2.5 py-1.5 text-xs text-slate-200 hover:text-white hover:bg-slate-800 rounded-lg transition"
+              >
+                <FileCode className="w-3.5 h-3.5 text-purple-400" />
+                <span>Obsidian Canvas (.canvas)</span>
+              </button>
+              <button
+                onClick={() => handleDownload("mermaid")}
+                className="flex items-center gap-2 px-2.5 py-1.5 text-xs text-slate-200 hover:text-white hover:bg-slate-800 rounded-lg transition"
+              >
+                <FileCode className="w-3.5 h-3.5 text-amber-400" />
+                <span>Sơ đồ Mermaid Diagram</span>
+              </button>
+              <button
+                onClick={() => handleDownload("report")}
+                className="flex items-center gap-2 px-2.5 py-1.5 text-xs text-slate-200 hover:text-white hover:bg-slate-800 rounded-lg transition"
+              >
+                <FileText className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Báo Cáo Kiến Trúc (.md)</span>
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Top Floating Search & Quick Focus */}

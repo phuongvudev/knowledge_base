@@ -12,6 +12,8 @@ import {
   FolderPlus,
   ZoomIn,
   RefreshCw,
+  ShieldCheck,
+  Filter,
 } from "lucide-react";
 import { apiUrl } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
@@ -22,15 +24,17 @@ import { IngestZone } from "@/components/IngestZone";
 import { GapKanban } from "@/components/GapKanban";
 import { ProvenanceInspector } from "@/components/ProvenanceInspector";
 import { TelemetryDashboard } from "@/components/TelemetryDashboard";
+import { ArchitectureHealth } from "@/components/ArchitectureHealth";
 import { IndexingStatus } from "@/components/IndexingStatus";
 import { ProjectManager } from "@/components/ProjectManager";
 import { CreateProjectDialog } from "@/components/CreateProjectDialog";
 
 export default function KnowledgeStudioPage() {
-  const [activeTab, setActiveTab] = useState<"graph" | "ingest" | "gaps" | "provenance" | "telemetry">("graph");
+  const [activeTab, setActiveTab] = useState<"graph" | "health" | "ingest" | "gaps" | "provenance" | "telemetry">("graph");
   const [projects, setProjects] = useState<string[]>([]);
   const [selectedProject, setSelectedProject] = useState<string>("");
   const [lod, setLod] = useState<number>(0);
+  const [selectedDir, setSelectedDir] = useState<string>("all");
   const [graphStats, setGraphStats] = useState<{ totalNodes: number; renderedNodes: number }>({
     totalNodes: 0,
     renderedNodes: 0,
@@ -126,6 +130,34 @@ export default function KnowledgeStudioPage() {
     setActiveTab("provenance");
   };
 
+  const availableDirs = React.useMemo(() => {
+    const set = new Set<string>();
+    for (const n of nodes) {
+      const fp = n.properties?.file_path as string | undefined;
+      if (fp) {
+        const parts = fp.replace(/\\/g, "/").split("/").filter(Boolean);
+        if (parts.length >= 2) {
+          set.add(parts.slice(-3, -1).join("/"));
+        }
+      }
+    }
+    return Array.from(set).slice(0, 15).sort();
+  }, [nodes]);
+
+  const displayedNodes = React.useMemo(() => {
+    if (selectedDir === "all") return nodes;
+    return nodes.filter((n) => {
+      const fp = n.properties?.file_path as string | undefined;
+      return fp && fp.replace(/\\/g, "/").includes(selectedDir);
+    });
+  }, [nodes, selectedDir]);
+
+  const displayedEdges = React.useMemo(() => {
+    if (selectedDir === "all") return edges;
+    const nodeIds = new Set(displayedNodes.map((n) => n.id));
+    return edges.filter((e) => nodeIds.has(e.source_id) && nodeIds.has(e.target_id));
+  }, [edges, displayedNodes, selectedDir]);
+
   return (
     <div className="flex flex-col h-dvh w-full overflow-hidden bg-slate-950 text-slate-100">
       {/* ══════════════════════════════════════════════════════════ */}
@@ -159,6 +191,17 @@ export default function KnowledgeStudioPage() {
             }`}
           >
             <Share2 className="w-3.5 h-3.5" /> Sơ Đồ Neuron
+          </button>
+
+          <button
+            onClick={() => setActiveTab("health")}
+            className={`px-3.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition ${
+              activeTab === "health"
+                ? "bg-indigo-600 text-white shadow"
+                : "text-slate-300 hover:text-white"
+            }`}
+          >
+            <ShieldCheck className="w-3.5 h-3.5" /> Sức Khỏe Kiến Trúc
           </button>
 
           <button
@@ -251,6 +294,27 @@ export default function KnowledgeStudioPage() {
             Quản lý
           </Button>
 
+          {/* Branch / Package Filter */}
+          {availableDirs.length > 0 && activeTab === "graph" && (
+            <div className="hidden xl:flex items-center gap-1.5 text-xs text-slate-300 bg-slate-800/80 px-2.5 py-1.5 rounded-lg border border-slate-700/60">
+              <Filter className="w-3.5 h-3.5 text-cyan-400" />
+              <select
+                value={selectedDir}
+                onChange={(e) => setSelectedDir(e.target.value)}
+                className="bg-transparent text-white font-medium focus:outline-none cursor-pointer text-xs max-w-[130px] truncate"
+              >
+                <option value="all" className="bg-slate-800">
+                  Tất cả nhánh
+                </option>
+                {availableDirs.map((dir) => (
+                  <option key={dir} value={dir} className="bg-slate-800">
+                    {dir}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           {/* LOD Selector */}
           <div className="flex items-center gap-1.5 text-xs text-slate-300 bg-slate-800/80 px-2.5 py-1.5 rounded-lg border border-slate-700/60">
             <ZoomIn className="w-3.5 h-3.5 text-purple-400" />
@@ -299,15 +363,29 @@ export default function KnowledgeStudioPage() {
       {/* MAIN VIEW CONTENT CONTAINER                                */}
       {/* ══════════════════════════════════════════════════════════ */}
       <main className="flex-1 flex overflow-hidden relative">
+        {/* TAB 0: ARCHITECTURE HEALTH & DIAGNOSTICS */}
+        {activeTab === "health" && (
+          <div className="flex-1 h-full overflow-hidden">
+            <ArchitectureHealth
+              projectId={selectedProject}
+              onSelectNode={(nodeId) => {
+                setSelectedNodeId(nodeId);
+                setActiveTab("graph");
+              }}
+            />
+          </div>
+        )}
+
         {/* TAB 1: GRAPH CANVAS */}
         {activeTab === "graph" && (
           <div className="flex-1 flex h-full relative">
             <div className="flex-1 h-full">
               <GraphCanvas
-                nodes={nodes}
-                edges={edges}
+                nodes={displayedNodes}
+                edges={displayedEdges}
                 onSelectNode={handleSelectNode}
                 selectedNodeId={selectedNodeId}
+                projectId={selectedProject}
               />
             </div>
             {selectedNodeId && (

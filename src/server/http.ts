@@ -10,6 +10,8 @@ import { initUsage, usageSummary } from "../engine/usage.js";
 import { activeTools } from "../tools/index.js";
 import { persistExtraction } from "../engine/persist.js";
 import { computeCentrality, filterHubNodes, NodeCentrality } from "../engine/pagerank.js";
+import { auditArchitecture } from "../engine/diagnostics.js";
+import { visualizer } from "../engine/visualizer.js";
 import { knowledgeExtractor } from "../engine/parsers/extractor.js";
 import { LevelOfDetail } from "../types.js";
 
@@ -387,6 +389,74 @@ export function startHttpServer(db?: DatabaseInstance) {
       const ok = jobs.cancel(database, Number(parsedUrl.searchParams.get("id")));
       res.writeHead(ok ? 200 : 409, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ success: ok }));
+      return;
+    }
+
+    // 8c. Architecture Diagnostics & Health Audit
+    if (pathname === "/api/diagnostics" && req.method === "GET") {
+      const projectId = parsedUrl.searchParams.get("project_id");
+      if (!projectId) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Missing required project_id query parameter" }));
+        return;
+      }
+
+      const nodes = graphMemory.getProjectNodes(projectId);
+      const edges = graphMemory.getProjectEdges(projectId);
+      const report = auditArchitecture(projectId, nodes, edges);
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(report));
+      return;
+    }
+
+    // 8d. Export Architecture (Mermaid, Obsidian Canvas, Markdown Report)
+    if (pathname === "/api/export" && req.method === "GET") {
+      const projectId = parsedUrl.searchParams.get("project_id");
+      const format = parsedUrl.searchParams.get("format") || "mermaid";
+
+      if (!projectId) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Missing required project_id query parameter" }));
+        return;
+      }
+
+      const nodes = graphMemory.getProjectNodes(projectId);
+      const edges = graphMemory.getProjectEdges(projectId);
+
+      const projRow = database.prepare("SELECT name FROM projects WHERE id = ?").get(projectId) as { name?: string } | undefined;
+      const projName = projRow?.name || projectId;
+
+      if (format === "canvas") {
+        const json = visualizer.renderObsidianCanvas(nodes, edges);
+        res.writeHead(200, {
+          "Content-Type": "application/json",
+          "Content-Disposition": `attachment; filename="${projectId}.canvas"`,
+        });
+        res.end(json);
+        return;
+      }
+
+      if (format === "report") {
+        const audit = auditArchitecture(projectId, nodes, edges);
+        const report = visualizer.renderMarkdownReport(projectId, projName, nodes, edges, {
+          healthScore: audit.healthScore,
+          cycleCount: audit.summary.cycleCount,
+          orphanCount: audit.summary.orphanCount,
+          status: audit.summary.status,
+        });
+        res.writeHead(200, {
+          "Content-Type": "text/markdown; charset=utf-8",
+          "Content-Disposition": `attachment; filename="${projectId}-architecture.md"`,
+        });
+        res.end(report);
+        return;
+      }
+
+      // Default: Mermaid diagram
+      const mermaid = visualizer.renderMermaid(nodes, edges, LevelOfDetail.LOD0_MACRO);
+      res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end(mermaid);
       return;
     }
 

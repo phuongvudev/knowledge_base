@@ -276,3 +276,7 @@ export const PruneLibrariesSchema = z.object({
   dry_run: z.boolean().optional().default(false).describe("If true, only previews what would be pruned without deleting"),
   vacuum: z.boolean().optional().default(true).describe("If true, runs SQLite VACUUM to reclaim disk space after pruning"),
 });
+
+export const AuditArchitectureSchema = z.object({
+  project_id: z.string().describe("Target project slug"),
+});
