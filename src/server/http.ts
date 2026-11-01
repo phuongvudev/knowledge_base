@@ -8,6 +8,7 @@ import { telemetry } from "../engine/telemetry.js";
 import { jobs } from "../engine/jobs.js";
 import { initUsage, usageSummary } from "../engine/usage.js";
 import { activeTools } from "../tools/index.js";
+import { handleIngestionTool } from "../tools/ingestion_tools.js";
 import { persistExtraction } from "../engine/persist.js";
 import { computeCentrality, filterHubNodes, NodeCentrality } from "../engine/pagerank.js";
 import { auditArchitecture } from "../engine/diagnostics.js";
@@ -15,11 +16,12 @@ import { visualizer } from "../engine/visualizer.js";
 import { knowledgeExtractor } from "../engine/parsers/extractor.js";
 import { LevelOfDetail } from "../types.js";
 
-const PORT = parseInt(process.env.BACKEND_PORT || process.env.PORT || "4242", 10);
+const PORT = parseInt(process.env.BACKEND_PORT || "4242", 10);
 // Next.js static export (`npm run build`); in dev the UI runs on its own port
 const WEB_DIR = path.join(process.cwd(), "web", "out");
 
-export function startHttpServer(db?: DatabaseInstance) {
+export function startHttpServer(db?: DatabaseInstance, customPort?: number) {
+  const listenPort = customPort || PORT;
   const database = db || initDatabase();
   graphMemory.hydrate(database);
   telemetry.attach(database);
@@ -86,7 +88,7 @@ export function startHttpServer(db?: DatabaseInstance) {
       if (jobs.hasRunning(database, id)) return send(409, { error: "Dự án đang được lập chỉ mục" });
       database.exec("BEGIN");
       try {
-        for (const t of ["graph_nodes", "raw_sources", "knowledge_gaps", "ingest_jobs"]) {
+        for (const t of ["graph_edges", "graph_nodes", "raw_sources", "knowledge_gaps", "ingest_jobs", "project_lexicon"]) {
           database.prepare(`DELETE FROM ${t} WHERE project_id = ?`).run(id);
         }
         database.prepare(`DELETE FROM project_links WHERE project_id = ? OR linked_id = ?`).run(id, id);
@@ -290,13 +292,14 @@ export function startHttpServer(db?: DatabaseInstance) {
           topK = 250;
         }
 
+        const cachedCent = !domainFilter || domainFilter === "all" ? graphMemory.getCentrality(projectId || undefined) : undefined;
         if (topK > 0) {
-          const filtered = filterHubNodes(nodes, edges, topK);
+          const filtered = filterHubNodes(nodes, edges, topK, cachedCent);
           nodes = filtered.hubNodes;
           edges = filtered.hubEdges;
           centrality = filtered.centrality;
         } else {
-          centrality = computeCentrality(nodes, edges);
+          centrality = cachedCent || computeCentrality(nodes, edges);
         }
       }
 
@@ -467,7 +470,7 @@ export function startHttpServer(db?: DatabaseInstance) {
 
       const nodes = graphMemory.getProjectNodes(projectId);
       const edges = graphMemory.getProjectEdges(projectId);
-      const report = auditArchitecture(projectId, nodes, edges);
+      const report = auditArchitecture(projectId, nodes, edges, graphMemory.getCentrality(projectId));
 
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(report));
@@ -502,7 +505,7 @@ export function startHttpServer(db?: DatabaseInstance) {
       }
 
       if (format === "report") {
-        const audit = auditArchitecture(projectId, nodes, edges);
+        const audit = auditArchitecture(projectId, nodes, edges, graphMemory.getCentrality(projectId));
         const report = visualizer.renderMarkdownReport(projectId, projName, nodes, edges, {
           healthScore: audit.healthScore,
           cycleCount: audit.summary.cycleCount,
@@ -594,6 +597,130 @@ export function startHttpServer(db?: DatabaseInstance) {
       return;
     }
 
+    // 9a. Detect project root directory from existing indexed files
+    if (pathname === "/api/project-root" && req.method === "GET") {
+      const pId = parsedUrl.searchParams.get("project_id");
+      if (!pId) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "project_id is required" }));
+        return;
+      }
+      const rows = database
+        .prepare(`SELECT file_path FROM raw_sources WHERE project_id = ? AND file_path IS NOT NULL LIMIT 50`)
+        .all(pId) as Array<{ file_path: string }>;
+      const validPaths = rows
+        .map((r) => r.file_path)
+        .filter((fp) => fp && !fp.includes("/data/uploads/") && path.isAbsolute(fp));
+
+      let detectedRoot = "";
+      if (validPaths.length > 0) {
+        const splitPaths = validPaths.map((p) => path.dirname(p).split(path.sep));
+        const first = splitPaths[0];
+        let commonLen = first.length;
+        for (const sp of splitPaths.slice(1)) {
+          let i = 0;
+          while (i < commonLen && i < sp.length && sp[i] === first[i]) i++;
+          commonLen = i;
+        }
+        detectedRoot = first.slice(0, commonLen).join(path.sep) || "/";
+      }
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ project_id: pId, dir_path: detectedRoot, indexed_files: validPaths.length }));
+      return;
+    }
+
+    // 9b. Batch Directory Ingest or Incremental Sync
+    if (pathname === "/api/sync" && req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", async () => {
+        try {
+          const data = JSON.parse(body);
+          const { project_id, dir_path, mode, force, ignore } = data;
+          if (!project_id) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Thiếu project_id" }));
+            return;
+          }
+          if (mode === "batch" && (!dir_path || !fs.existsSync(dir_path))) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: `Thư mục không tồn tại trên máy: ${dir_path || "(trống)"}` }));
+            return;
+          }
+
+          const toolName = mode === "batch" ? "kb_batch_ingest_directory" : "kb_sync";
+          const toolArgs =
+            mode === "batch"
+              ? { project_id, dir_path: dir_path.trim(), force: Boolean(force), ignore }
+              : { project_id, dir_path: dir_path?.trim() || undefined, ignore };
+
+          const result = await handleIngestionTool(toolName, toolArgs, database);
+          if (result?.isError) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: result.content[0]?.text || "Lỗi đồng bộ" }));
+            return;
+          }
+
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              success: true,
+              message: result?.content[0]?.text || "Đồng bộ thành công",
+            })
+          );
+        } catch (err: any) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // 9c. Add Architectural Decision / Business Rule Node directly
+    if (pathname === "/api/nodes" && req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", async () => {
+        try {
+          const data = JSON.parse(body);
+          const { project_id, id, label, node_type, summary, domain, links_to } = data;
+          if (!project_id || !id || !label || !summary) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Vui lòng nhập đầy đủ id, tiêu đề (label) và nội dung tóm tắt (summary)" }));
+            return;
+          }
+
+          const result = await handleIngestionTool(
+            "kb_add_node",
+            {
+              project_id,
+              id: id.trim(),
+              label: label.trim(),
+              node_type: node_type || "decision",
+              summary: summary.trim(),
+              domain: domain?.trim() || "architecture",
+              links_to: Array.isArray(links_to) && links_to.length > 0 ? links_to : undefined,
+            },
+            database
+          );
+
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              success: true,
+              node_id: id.trim(),
+              message: result?.content[0]?.text || "Đã lưu nút tri thức",
+            })
+          );
+        } catch (err: any) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
     // ══════════════════════════════════════════════════════════
     // STATIC FILE SERVING FOR WEB STUDIO UI
     // ══════════════════════════════════════════════════════════
@@ -633,10 +760,10 @@ export function startHttpServer(db?: DatabaseInstance) {
     res.end("404 Not Found");
   });
 
-  server.listen(PORT, () => {
+  server.listen(listenPort, () => {
     console.log(`\n==========================================================`);
     console.log(`   🌐 NEURAL KNOWLEDGE STUDIO (WEB UI) RUNNING            `);
-    console.log(`   👉 URL: http://localhost:${PORT}                      `);
+    console.log(`   👉 URL: http://localhost:${listenPort}                  `);
     console.log(`==========================================================\n`);
   });
 

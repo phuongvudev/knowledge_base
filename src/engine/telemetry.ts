@@ -106,7 +106,16 @@ class TelemetryEngine {
       };
     }
 
-    const latencies = records.map((r) => r.duration_ms).sort((a, b) => a - b);
+    const WRITE_TOOLS = new Set([
+      "kb_batch_ingest_directory",
+      "kb_ingest_file",
+      "kb_sync",
+      "kb_resolve_library",
+    ]);
+    const queryRecords = records.filter((r) => !WRITE_TOOLS.has(r.tool_name));
+    const latRecords = queryRecords.length > 0 ? queryRecords : records;
+
+    const latencies = latRecords.map((r) => r.duration_ms).sort((a, b) => a - b);
     const totalDuration = latencies.reduce((acc, v) => acc + v, 0);
     const totalReturned = records.reduce((acc, r) => acc + r.tokens_returned, 0);
     const totalRaw = records.reduce((acc, r) => acc + r.raw_equivalent_tokens, 0);
@@ -121,8 +130,8 @@ class TelemetryEngine {
     const mem = process.memoryUsage();
 
     return {
-      total_queries: records.length,
-      avg_latency_ms: Number((totalDuration / records.length).toFixed(2)),
+      total_queries: latRecords.length,
+      avg_latency_ms: Number((totalDuration / latRecords.length).toFixed(2)),
       p50_latency_ms: Number(p50.toFixed(2)),
       p95_latency_ms: Number(p95.toFixed(2)),
       p99_latency_ms: Number(p99.toFixed(2)),

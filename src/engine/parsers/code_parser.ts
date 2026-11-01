@@ -14,7 +14,41 @@ export interface ParsedCodeEntity {
 }
 
 const MAX_SUMMARY = 220;
-const SOURCE_EXTS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".py", ".dart"];
+const SOURCE_EXTS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".py", ".dart", ".kt", ".kts", ".swift"];
+
+const BUILTIN_CALLS = new Set([
+  "if", "for", "while", "switch", "catch", "return", "function", "typeof", "instanceof", "super", "this",
+  "require", "import", "export", "new", "delete", "void", "yield", "await", "async",
+  "Array", "Map", "Set", "WeakMap", "WeakSet", "Promise", "Object", "String", "Number", "Boolean",
+  "Symbol", "BigInt", "Math", "JSON", "Date", "RegExp", "Error", "TypeError", "RangeError", "Buffer",
+  "URL", "URLSearchParams", "TextEncoder", "TextDecoder", "console", "process",
+  "parseInt", "parseFloat", "isNaN", "isFinite", "encodeURIComponent", "decodeURIComponent",
+  "setTimeout", "clearTimeout", "setInterval", "clearInterval", "queueMicrotask", "fetch",
+  "describe", "it", "test", "expect", "assert",
+  "get", "set", "has", "add", "delete", "clear", "keys", "values", "entries", "forEach",
+  "map", "filter", "reduce", "find", "findIndex", "some", "every", "includes", "indexOf",
+  "slice", "splice", "push", "pop", "shift", "unshift", "join", "split", "replace", "replaceAll",
+  "trim", "trimStart", "trimEnd", "toLowerCase", "toUpperCase", "startsWith", "endsWith", "match", "exec",
+  "sort", "reverse", "flat", "flatMap", "fill", "from", "of", "isArray", "assign", "freeze",
+  "stringify", "parse", "now", "min", "max", "floor", "ceil", "round", "abs", "sqrt", "pow",
+  "log", "warn", "error", "info", "debug", "toString", "valueOf", "toFixed",
+  "print", "len", "range", "list", "dict", "set", "str", "int", "float", "bool", "tuple", "isinstance", "getattr", "setattr",
+  "println", "listOf", "mapOf", "setOf", "mutableListOf", "mutableMapOf", "mutableSetOf", "emptyList", "emptyMap",
+]);
+
+function extractCalls(snippet: string, ownName: string): string[] {
+  const shortOwn = ownName.includes(".") ? ownName.split(".").pop()! : ownName;
+  const out = new Set<string>();
+  const re = /\b(?:new\s+)?([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g;
+  let m;
+  while ((m = re.exec(snippet)) !== null) {
+    const id = m[1];
+    if (id.length < 3 || id === ownName || id === shortOwn || BUILTIN_CALLS.has(id)) continue;
+    out.add(id);
+    if (out.size >= 30) break;
+  }
+  return [...out];
+}
 
 const lineOf = (content: string, index: number) => content.slice(0, index).split("\n").length;
 
@@ -73,10 +107,28 @@ export class CodeParser {
       }
       return { external: [...external], internal: [...internal] };
     }
+    if (filePath.endsWith(".kt") || filePath.endsWith(".kts")) {
+      const kre = /^\s*import\s+([A-Za-z0-9_.]+)/gm;
+      let k;
+      while ((k = kre.exec(content)) !== null) {
+        const pkg = k[1];
+        if (!pkg.startsWith("kotlin.") && !pkg.startsWith("java.") && !pkg.startsWith("javax.")) {
+          external.add(pkg.split(".").slice(0, 2).join("."));
+        }
+      }
+      return { external: [...external], internal: [...internal] };
+    }
     const re = /(?:import|export)\s+(?:[^'"]*?\s+from\s+)?['"]([^'"]+)['"]|require\(\s*['"]([^'"]+)['"]\s*\)/g;
     let m;
     while ((m = re.exec(content)) !== null) {
       const spec = m[1] || m[2];
+      if (spec.startsWith("@/") || spec.startsWith("~/")) {
+        const aliased = this.resolveAlias(filePath, spec.slice(2));
+        if (aliased) {
+          internal.add(aliased);
+          continue;
+        }
+      }
       if (!spec.startsWith(".")) {
         external.add(spec);
         continue;
@@ -85,6 +137,18 @@ export class CodeParser {
       if (target) internal.add(target);
     }
     return { external: [...external], internal: [...internal] };
+  }
+
+  private resolveAlias(fromFile: string, relSpec: string): string | null {
+    for (let dir = path.dirname(fromFile), i = 0; i < 6 && dir !== path.dirname(dir); dir = path.dirname(dir), i++) {
+      if (fs.existsSync(path.join(dir, "tsconfig.json")) || fs.existsSync(path.join(dir, "package.json"))) {
+        const hit =
+          this.resolveRelative(path.join(dir, "src"), "./" + relSpec) ||
+          this.resolveRelative(dir, "./" + relSpec);
+        if (hit) return hit;
+      }
+    }
+    return null;
   }
 
   // package:foo/x.dart is ours when an ancestor is package foo itself or has packages/foo (melos layout)
@@ -114,12 +178,16 @@ export class CodeParser {
     const fileName = path.basename(filePath, ext);
     const entities: ParsedCodeEntity[] = [];
 
-    if (ext === ".ts" || ext === ".tsx" || ext === ".js" || ext === ".jsx") {
+    if (ext === ".ts" || ext === ".tsx" || ext === ".js" || ext === ".jsx" || ext === ".mjs") {
       this.parseTypeScript(fileName, content, entities);
     } else if (ext === ".py") {
       this.parsePython(fileName, content, entities);
     } else if (ext === ".dart") {
       this.parseDart(fileName, content, entities);
+    } else if (ext === ".kt" || ext === ".kts") {
+      this.parseKotlin(fileName, content, entities);
+    } else if (ext === ".swift") {
+      this.parseSwift(fileName, content, entities);
     } else if (ext === ".sql") {
       this.parseSQL(fileName, content, entities);
     } else if (ext === ".json") {
@@ -138,6 +206,17 @@ export class CodeParser {
         dependsOn: [],
         storesIn: [],
       });
+    }
+
+    const lines = content.split("\n");
+    const sortedByLine = [...entities].filter((e) => e.line).sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
+    for (let i = 0; i < sortedByLine.length; i++) {
+      const cur = sortedByLine[i];
+      if (cur.calls.length > 0) continue;
+      const startLine = cur.line ?? 1;
+      const nextLine = sortedByLine[i + 1]?.line ?? Math.min(lines.length + 1, startLine + 400);
+      const bodySlice = lines.slice(startLine - 1, Math.min(nextLine - 1, startLine + 400)).join("\n");
+      cur.calls = extractCalls(bodySlice, cur.name);
     }
 
     if (ext !== ".py") {
@@ -180,7 +259,7 @@ export class CodeParser {
         kind: "api_endpoint",
         summary: `API Endpoint ${method} ${routePath} in ${fileName}`,
         calls: [],
-        dependsOn: imports.slice(0, 3),
+        dependsOn: [],
         storesIn: [],
         line: lineOf(content, routeMatch.index),
       });
@@ -191,13 +270,14 @@ export class CodeParser {
     let classMatch;
     while ((classMatch = classRegex.exec(content)) !== null) {
       const className = classMatch[1];
+      const baseClass = classMatch[2]?.trim();
       const isService = className.toLowerCase().includes("service");
       out.push({
         name: className,
         kind: isService ? "service" : "component",
-        summary: describe(`class ${className}${classMatch[2] ? ` extends ${classMatch[2]}` : ""}`, docAbove(content, classMatch.index), className),
-        calls: [],
-        dependsOn: imports.slice(0, 5),
+        summary: describe(`class ${className}${baseClass ? ` extends ${baseClass}` : ""}`, docAbove(content, classMatch.index), className),
+        calls: baseClass ? [baseClass] : [],
+        dependsOn: [],
         storesIn: [],
         line: lineOf(content, classMatch.index),
       });
@@ -380,12 +460,13 @@ export class CodeParser {
     let classMatch;
     while ((classMatch = classRegex.exec(content)) !== null) {
       const className = classMatch[1];
+      const baseClass = classMatch[2]?.trim();
       out.push({
         name: className,
         kind: className.toLowerCase().includes("service") ? "service" : "component",
-        summary: describe(`class ${className}${classMatch[2] ? `(${classMatch[2]})` : ""}`, docstring(classMatch.index), className),
-        calls: [],
-        dependsOn: imports.slice(0, 5),
+        summary: describe(`class ${className}${baseClass ? `(${baseClass})` : ""}`, docstring(classMatch.index), className),
+        calls: baseClass ? [baseClass] : [],
+        dependsOn: [],
         storesIn: [],
         line: lineOf(content, classMatch.index),
       });
@@ -413,8 +494,100 @@ export class CodeParser {
         kind: "component",
         summary: `Python module ${fileName} (${lines.length} lines)`,
         calls: [],
-        dependsOn: imports.slice(0, 5),
+        dependsOn: [],
         storesIn: [],
+      });
+    }
+  }
+
+  private parseKotlin(fileName: string, content: string, out: ParsedCodeEntity[]): void {
+    const push = (name: string, kind: ParsedCodeEntity["kind"], sig: string, index: number) =>
+      out.push({ name, kind, summary: describe(sig, docAbove(content, index), name), calls: [], dependsOn: [], storesIn: [], line: lineOf(content, index) });
+
+    const typeRe = /^[ \t]*(?:@\w+(?:\([^)]*\))?\s*)*((?:public|internal|open|abstract|sealed|data|enum|value|annotation)\s+)*(class|interface|object)\s+([A-Za-z_]\w*)(?:<[^>{]*>)?(?:\s*(?:\([^)]*\))?\s*:\s*([^{=\n]+))?/gm;
+    const classes: { name: string; line: number }[] = [];
+    let m;
+    while ((m = typeRe.exec(content)) !== null) {
+      const [, mods, kw, name, base] = m;
+      const isDataModel = /\b(data|enum|value)\b/.test(mods || "") || kw === "interface";
+      const isService = /service|repository|manager|engine|controller|orchestrator|kernel/i.test(name);
+      push(
+        name,
+        isDataModel ? "data_model" : isService ? "service" : "component",
+        `${(mods || "").trim()} ${kw} ${name}${base ? ` : ${base.trim()}` : ""}`.trim(),
+        m.index
+      );
+      classes.push({ name, line: lineOf(content, m.index) });
+    }
+
+    const funRe = /^([ \t]*)(?:public\s+|open\s+|override\s+|suspend\s+|inline\s+|operator\s+)*fun\s+(?:<[^>\n]*>\s*)?(?:[A-Za-z0-9_<>?., ]+\.)?([A-Za-z_]\w*)\s*\(([^)]*)\)(?:\s*:\s*([^{=\n]+))?/gm;
+    while ((m = funRe.exec(content)) !== null) {
+      if (/\b(private|protected)\b/.test(m[0])) continue;
+      const indent = m[1].length;
+      const fnName = m[2];
+      const params = m[3].replace(/\s+/g, " ").trim();
+      const ret = m[4]?.trim();
+      const line = lineOf(content, m.index);
+      const owner = indent > 0 ? [...classes].reverse().find((c) => c.line <= line && line - c.line <= 500) : undefined;
+      const fullName = owner ? `${owner.name}.${fnName}` : fnName;
+      push(fullName, "component", `fun ${fullName}(${params})${ret ? `: ${ret}` : ""}`, m.index);
+    }
+
+    if (out.length === 0) {
+      out.push({
+        name: fileName,
+        kind: "component",
+        summary: `Kotlin module ${fileName} (${content.split("\n").length} lines)`,
+        calls: [],
+        dependsOn: [],
+        storesIn: [],
+        line: 1,
+      });
+    }
+  }
+
+  private parseSwift(fileName: string, content: string, out: ParsedCodeEntity[]): void {
+    const push = (name: string, kind: ParsedCodeEntity["kind"], sig: string, index: number) =>
+      out.push({ name, kind, summary: describe(sig, docAbove(content, index), name), calls: [], dependsOn: [], storesIn: [], line: lineOf(content, index) });
+
+    const typeRe = /^[ \t]*(?:@\w+(?:\([^)]*\))?\s*)*((?:public|open|internal|final|indirect)\s+)*(class|struct|enum|protocol|actor)\s+([A-Za-z_]\w*)(?:<[^>{]*>)?(?:\s*:\s*([^{=\n]+))?/gm;
+    const classes: { name: string; line: number }[] = [];
+    let m;
+    while ((m = typeRe.exec(content)) !== null) {
+      const [, mods, kw, name, base] = m;
+      const isDataModel = kw === "struct" || kw === "enum" || kw === "protocol";
+      const isService = /service|repository|manager|controller|viewModel/i.test(name);
+      push(
+        name,
+        isDataModel ? "data_model" : isService ? "service" : "component",
+        `${(mods || "").trim()} ${kw} ${name}${base ? `: ${base.trim()}` : ""}`.trim(),
+        m.index
+      );
+      classes.push({ name, line: lineOf(content, m.index) });
+    }
+
+    const funcRe = /^([ \t]*)(?:public\s+|open\s+|static\s+|class\s+|override\s+|mutating\s+)*func\s+([A-Za-z_]\w*)\s*(?:<[^>\n]*>)?\(([^)]*)\)(?:\s*(?:async\s*)?(?:throws\s*)?(?:->\s*([^{=\n]+))?)?/gm;
+    while ((m = funcRe.exec(content)) !== null) {
+      if (/\b(private|fileprivate)\b/.test(m[0])) continue;
+      const indent = m[1].length;
+      const fnName = m[2];
+      const params = m[3].replace(/\s+/g, " ").trim();
+      const ret = m[4]?.trim();
+      const line = lineOf(content, m.index);
+      const owner = indent > 0 ? [...classes].reverse().find((c) => c.line <= line && line - c.line <= 500) : undefined;
+      const fullName = owner ? `${owner.name}.${fnName}` : fnName;
+      push(fullName, "component", `func ${fullName}(${params})${ret ? ` -> ${ret}` : ""}`, m.index);
+    }
+
+    if (out.length === 0) {
+      out.push({
+        name: fileName,
+        kind: "component",
+        summary: `Swift module ${fileName} (${content.split("\n").length} lines)`,
+        calls: [],
+        dependsOn: [],
+        storesIn: [],
+        line: 1,
       });
     }
   }

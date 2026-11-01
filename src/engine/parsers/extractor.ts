@@ -106,6 +106,8 @@ export class KnowledgeExtractor {
         properties: {
           file_path: filePath,
           page: sec.page,
+          ...(sec.line ? { line: sec.line } : {}),
+          ...(sec.endLine ? { end_line: sec.endLine } : {}),
           roles_mentioned: sec.rolesMentioned,
           rules_extracted: sec.rulesExtracted,
         },
@@ -114,6 +116,7 @@ export class KnowledgeExtractor {
           source_file: filePath,
           source_type: path.extname(filePath).slice(1) as any,
           page: sec.page,
+          line: sec.line,
           section: sec.title,
           extracted_at: new Date().toISOString(),
         },
@@ -227,6 +230,8 @@ export class KnowledgeExtractor {
         file_hash: fileHash,
         line: 1,
         imports: imports.internal.map((f) => path.basename(f)),
+        internal_imports: imports.internal.map((f) => `module:${this.pathSlug(f)}`),
+        external_imports: imports.external,
         doc_type: cls.docType,
         classification: { confidence: cls.confidence, matched: cls.matched, auto: autoDomain },
       },
@@ -237,6 +242,16 @@ export class KnowledgeExtractor {
         extracted_at: new Date().toISOString(),
       },
     });
+
+    const localByName = new Map<string, string>();
+    for (const item of parsed) {
+      const itemNodeId = `${item.kind}:${fileSlug}:${this.slugify(item.name)}`;
+      localByName.set(item.name, itemNodeId);
+      if (item.name.includes(".")) {
+        const shortName = item.name.split(".").pop()!;
+        if (!localByName.has(shortName)) localByName.set(shortName, itemNodeId);
+      }
+    }
 
     for (const item of parsed) {
       const itemNodeId = `${item.kind}:${fileSlug}:${this.slugify(item.name)}`;
@@ -249,7 +264,12 @@ export class KnowledgeExtractor {
         node_type: nodeType,
         summary: item.summary,
         domain,
-        properties: { file_path: filePath, line: item.line, ...(item.doc ? { doc: item.doc } : {}) },
+        properties: {
+          file_path: filePath,
+          line: item.line,
+          ...(item.doc ? { doc: item.doc } : {}),
+          ...(item.calls?.length ? { calls: item.calls } : {}),
+        },
         is_hub: item.kind === "service",
         provenance: {
           source_file: filePath,
@@ -269,8 +289,35 @@ export class KnowledgeExtractor {
         weight: 1.0,
       });
 
-      // Edge for dependencies
+      // Intra-file symbol calls
+      for (const callee of item.calls || []) {
+        const targetId = localByName.get(callee);
+        if (targetId && targetId !== itemNodeId) {
+          edges.push({
+            project_id: projectId,
+            source_id: itemNodeId,
+            target_id: targetId,
+            relation_type: "CALLS",
+            description: `Calls ${callee}`,
+            weight: 1.0,
+          });
+        }
+      }
+
+      // Edge for dependencies (prefer local entity in same file such as SQL table or Compose service)
       for (const dep of item.dependsOn) {
+        const localDepId = localByName.get(dep);
+        if (localDepId && localDepId !== itemNodeId) {
+          edges.push({
+            project_id: projectId,
+            source_id: itemNodeId,
+            target_id: localDepId,
+            relation_type: "DEPENDS_ON",
+            description: `Depends on ${dep}`,
+            weight: 1.0,
+          });
+          continue;
+        }
         const depId = `module:${this.slugify(dep)}`;
         nodes.push({
           id: depId,

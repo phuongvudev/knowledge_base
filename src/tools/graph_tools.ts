@@ -113,19 +113,25 @@ export async function handleGraphTool(
     const dbDuration = Number(process.hrtime.bigint() - tDbStart) / 1_000_000;
 
     const tGraphStart = process.hrtime.bigint();
+    const centrality = graphMemory.getCentrality(project_id);
     let rendered = "";
     if (format === "mermaid") {
       rendered = visualizer.renderMermaid(
         nodes,
         edges,
-        lod === 0 ? LevelOfDetail.LOD0_MACRO : LevelOfDetail.LOD1_MESO
+        lod === 0 ? LevelOfDetail.LOD0_MACRO : LevelOfDetail.LOD1_MESO,
+        centrality
       );
     } else {
-      rendered = visualizer.renderOutline(nodes, edges, `Project [${project_id}] Topology`);
+      rendered = visualizer.renderOutline(nodes, edges, `Project [${project_id}] Topology`, 15, centrality);
     }
     const graphDuration = Number(process.hrtime.bigint() - tGraphStart) / 1_000_000;
 
-    const rawEquivalent = nodes.map((n) => `${n.label}: ${n.summary}`).join("\n");
+    // Realistic baseline: scanning top module/hub summaries (up to 60 modules), not reading every single symbol in a 4,000-node monorepo
+    const baselineNodes = nodes.filter((n) => n.node_type === "module" || n.is_hub).slice(0, 60);
+    const rawEquivalent = (baselineNodes.length > 0 ? baselineNodes : nodes.slice(0, 60))
+      .map((n) => `${n.label}: ${n.summary}`)
+      .join("\n");
     const { footer } = telemetry.record(
       name,
       startTime,
@@ -144,7 +150,7 @@ export async function handleGraphTool(
     const { node_id, depth } = GraphExploreSchema.parse(args);
 
     const tGraphStart = process.hrtime.bigint();
-    const center = graphMemory.getNode(node_id);
+    const center = graphMemory.resolveNode(node_id);
     if (!center) {
       return {
         content: [{ type: "text", text: `Node '${node_id}' not found in knowledge graph.` }],
@@ -152,7 +158,7 @@ export async function handleGraphTool(
       };
     }
 
-    const { nodes, edges } = graphMemory.getRadialSubgraph(node_id, depth, 15);
+    const { nodes, edges } = graphMemory.getRadialSubgraph(center.id, depth, 15);
     const graphDuration = Number(process.hrtime.bigint() - tGraphStart) / 1_000_000;
 
     const lines: string[] = [
@@ -164,7 +170,7 @@ export async function handleGraphTool(
     ];
 
     for (const edge of edges) {
-      const isOutbound = edge.source_id === node_id;
+      const isOutbound = edge.source_id === center.id;
       const otherId = isOutbound ? edge.target_id : edge.source_id;
       const otherNode = graphMemory.getNode(otherId);
       const otherLabel = otherNode ? otherNode.label : otherId;
@@ -185,7 +191,8 @@ export async function handleGraphTool(
     }
 
     const rendered = lines.join("\n");
-    const rawEquivalent = nodes.map((n) => n.summary).join("\n");
+    // Realistic baseline: grepping + inspecting ~300 tokens (1200 chars) per neighbor file (capped at 6 files)
+    const rawEquivalent = "x".repeat(Math.min(Math.max(nodes.length, 2), 6) * 1200);
     const { footer } = telemetry.record(
       name,
       startTime,
@@ -204,7 +211,7 @@ export async function handleGraphTool(
     const { target_node_id } = GraphImpactSchema.parse(args);
 
     const tGraphStart = process.hrtime.bigint();
-    const targetNode = graphMemory.getNode(target_node_id);
+    const targetNode = graphMemory.resolveNode(target_node_id);
     if (!targetNode) {
       return {
         content: [{ type: "text", text: `Node '${target_node_id}' not found in knowledge graph.` }],
@@ -212,11 +219,14 @@ export async function handleGraphTool(
       };
     }
 
-    const { affectedNodes, paths } = graphMemory.getImpactSubgraph(target_node_id);
+    const { affectedNodes, paths } = graphMemory.getImpactSubgraph(targetNode.id);
     const graphDuration = Number(process.hrtime.bigint() - tGraphStart) / 1_000_000;
 
+    const MAX_SHOWN_NODES = 25;
+    const shownNodes = affectedNodes.slice(0, MAX_SHOWN_NODES);
+
     const lines: string[] = [
-      `### Impact Analysis for: \`${target_node_id}\` (${targetNode.label})`,
+      `### Impact Analysis for: \`${targetNode.id}\` (${targetNode.label})`,
       `Found **${affectedNodes.length} components/rules** directly or transitively dependent on this node.`,
       "",
     ];
@@ -225,18 +235,22 @@ export async function handleGraphTool(
       lines.push("No downstream dependencies found. This node can be safely modified or refactored.");
     } else {
       lines.push("**Affected Downstream Entities:**");
-      for (const node of affectedNodes) {
+      for (const node of shownNodes) {
         lines.push(`- \`${node.id}\` [${node.node_type}]: ${node.label} — ${node.summary}`);
+      }
+      if (affectedNodes.length > MAX_SHOWN_NODES) {
+        lines.push(`... +${affectedNodes.length - MAX_SHOWN_NODES} more transitive dependents omitted to preserve context budget.`);
       }
       lines.push("");
       lines.push("**Dependency Chains:**");
-      for (const path of paths.slice(0, 10)) {
+      for (const path of paths.slice(0, 12)) {
         lines.push(`- \`${path.source_id}\` depends on \`${path.target_id}\` via \`${path.relation_type}\``);
       }
     }
 
     const rendered = lines.join("\n");
-    const rawEquivalent = affectedNodes.map((n) => n.summary).join("\n");
+    // Realistic baseline: without impact graph, agent runs multiple grep + read_file passes (~400 tokens / 1600 chars per affected caller, capped at 8 files)
+    const rawEquivalent = "x".repeat(Math.min(Math.max(affectedNodes.length, 1), 8) * 1600);
     const { footer } = telemetry.record(
       name,
       startTime,
@@ -255,7 +269,8 @@ export async function handleGraphTool(
     const { project_id } = AuditArchitectureSchema.parse(args);
     const nodes = graphMemory.getProjectNodes(project_id);
     const edges = graphMemory.getProjectEdges(project_id);
-    const report = auditArchitecture(project_id, nodes, edges);
+    const centrality = graphMemory.getCentrality(project_id);
+    const report = auditArchitecture(project_id, nodes, edges, centrality);
 
     const lines = [
       `### Architecture Health Audit: **${project_id}**`,

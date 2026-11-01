@@ -670,6 +670,55 @@ await run("visualizer: Obsidian Canvas and Markdown Report exports", async () =>
   assert.ok(mdReport.includes("```mermaid"));
 });
 
+await run("optimizations: path aliases, cross-file CALLS, doc section line excerpts, Kotlin/Swift parsers, centrality cache", async () => {
+  const { codeParser } = await import("./engine/parsers/code_parser.js");
+  const { graphMemory } = await import("./engine/graph_memory.js");
+  const { handleGraphTool } = await import("./tools/graph_tools.js");
+
+  // 1. Kotlin & Swift parsers
+  const ktSrc = `package com.example\nimport io.ktor.client.HttpClient\n/** Core kernel orchestrator. */\nclass KernelEngine : BaseEngine {\n  fun startEngine(port: Int): Boolean {\n    return true\n  }\n  private fun secret() {}\n}\ndata class Config(val host: String)\n`;
+  const ktEntities = codeParser.parseFile("KernelEngine.kt", ktSrc);
+  assert.deepEqual(ktEntities.map((e) => e.name).sort(), ["Config", "KernelEngine", "KernelEngine.startEngine"]);
+  assert.equal(ktEntities.find((e) => e.name === "KernelEngine")?.kind, "service");
+  assert.equal(ktEntities.find((e) => e.name === "Config")?.kind, "data_model");
+
+  const swiftSrc = `import Foundation\n/// Manages user session.\npublic final class SessionManager: NSObject {\n  public func refreshToken(force: Bool) async throws -> String {\n    return "ok"\n  }\n  private func internalHelper() {}\n}\npublic struct UserProfile {\n  let id: String\n}\n`;
+  const swiftEntities = codeParser.parseFile("SessionManager.swift", swiftSrc);
+  assert.deepEqual(swiftEntities.map((e) => e.name).sort(), ["SessionManager", "SessionManager.refreshToken", "UserProfile"]);
+
+  // 2. Path alias (@/) + cross-file symbol CALLS
+  const aliasDir = path.join(tmp, "alias-proj");
+  fs.mkdirSync(path.join(aliasDir, "src", "lib"), { recursive: true });
+  fs.mkdirSync(path.join(aliasDir, "src", "components"), { recursive: true });
+  fs.writeFileSync(path.join(aliasDir, "tsconfig.json"), "{}");
+  const apiFile = path.join(aliasDir, "src", "lib", "api.ts");
+  const compFile = path.join(aliasDir, "src", "components", "View.tsx");
+  fs.writeFileSync(apiFile, `export function buildApiUrl(endpoint: string): string {\n  return endpoint;\n}\n`);
+  fs.writeFileSync(compFile, `import { buildApiUrl } from "@/lib/api";\nexport function renderView(): string {\n  return buildApiUrl("/status");\n}\n`);
+
+  // Ingest caller before callee to verify bidirectional cross-file CALLS resolution
+  await handleIngestionTool("kb_ingest_file", { project_id: "p-opt", file_path: compFile, domain: "auto" }, db);
+  await handleIngestionTool("kb_ingest_file", { project_id: "p-opt", file_path: apiFile, domain: "auto" }, db);
+
+  const impact = (await handleGraphTool("kb_graph_impact", { target_node_id: "component:lib_api_ts:buildapiurl" }, db))!.content[0].text;
+  assert.ok(impact.includes("component:components_view_tsx:renderview"), `cross-file CALLS impact: ${impact}`);
+
+  // 3. Document section exact line excerpt on kb_node_get(include_raw: true)
+  const docFile = path.join(aliasDir, "policy.md");
+  const padding = Array.from({ length: 40 }, (_, i) => `Intro line ${i + 1} with enough characters to exceed twenty.`).join("\n");
+  fs.writeFileSync(docFile, `# Intro\n\n${padding}\n\n## Điều 9: Quy định bảo mật khóa\n\nBắt buộc xoay vòng khóa mỗi 90 ngày đối với nhân viên.\n`);
+  await handleIngestionTool("kb_ingest_file", { project_id: "p-opt", file_path: docFile, domain: "auto" }, db);
+  const secNode = graphMemory.getProjectNodes("p-opt").find((n) => n.id.includes("dieu_9"));
+  assert.ok(secNode, "found dieu_9 node");
+  const rawSec = (await handleQueryTool("kb_node_get", { node_id: secNode!.id, include_raw: true }, db))!.content[0].text;
+  assert.ok(rawSec.includes("Xoay vòng khóa".toLowerCase()) || rawSec.includes("xoay vòng khóa"), `section excerpt should include section body: ${rawSec}`);
+
+  // 4. Centrality cache identity & invalidation
+  const c1 = graphMemory.getCentrality("p-opt");
+  const c2 = graphMemory.getCentrality("p-opt");
+  assert.equal(c1, c2, "centrality map is cached when graph has not mutated");
+});
+
 server.close();
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log("ALL PASSED");

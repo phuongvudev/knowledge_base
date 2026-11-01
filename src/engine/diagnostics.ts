@@ -1,5 +1,5 @@
 import { GraphEdge, GraphNode } from "../types.js";
-import { computeCentrality } from "./pagerank.js";
+import { computeCentrality, NodeCentrality } from "./pagerank.js";
 
 export interface DependencyCycle {
   id: string;
@@ -56,9 +56,19 @@ export function detectCircularDependencies(
     "USES",
   ]);
 
+  const isBarrelOrDi = (n?: GraphNode) => {
+    if (!n) return false;
+    if (n.node_type === "module" && n.summary.includes("no recognised definitions")) return true;
+    const fp = (n.properties?.file_path as string | undefined) || "";
+    return /(^|\/)(di\/injection|injection_container)\.[a-z0-9]+$/i.test(fp);
+  };
+
   for (const e of edges) {
     const rel = e.relation_type?.toUpperCase() || "DEPENDS_ON";
     if (structuralTypes.has(rel) || !e.relation_type) {
+      const srcNode = nodeMap.get(e.source_id);
+      const tgtNode = nodeMap.get(e.target_id);
+      if (isBarrelOrDi(srcNode) || isBarrelOrDi(tgtNode)) continue;
       if (adj.has(e.source_id) && adj.has(e.target_id)) {
         adj.get(e.source_id)!.push(e.target_id);
       }
@@ -107,6 +117,17 @@ export function detectCircularDependencies(
     const elements = cycle.slice(0, cycle.length - 1);
     if (elements.length < 2) continue;
 
+    // Ignore 2-node cycles between sibling files in the exact same directory (co-located module pair)
+    if (elements.length === 2) {
+      const fA = nodeMap.get(elements[0])?.properties?.file_path as string | undefined;
+      const fB = nodeMap.get(elements[1])?.properties?.file_path as string | undefined;
+      if (fA && fB) {
+        const dirA = fA.slice(0, fA.lastIndexOf("/"));
+        const dirB = fB.slice(0, fB.lastIndexOf("/"));
+        if (dirA && dirA === dirB) continue;
+      }
+    }
+
     // Find min element to rotate cycle to canonical form
     let minIdx = 0;
     for (let i = 1; i < elements.length; i++) {
@@ -142,25 +163,41 @@ export function detectCircularDependencies(
   return results;
 }
 
+const ENTRYPOINT_FILE = /(^|\/)(index|main|app|server|runner|watcher|cli|setup|installer|benchmark|ab_bench|selftest[^/]*|page|layout|route|next\.config|postcss\.config|tailwind\.config|eslint\.config)\.[a-z0-9]+$|(\.test\.|\.spec\.|_test\.)|\.(json|ya?ml|sql|dockerfile)$|(^|\/)(tool|tools|scripts|production|example|examples|ephemeral|android|ios)\//i;
+
 /**
  * Detects orphan / dead nodes (no incoming references)
  */
 export function detectOrphanNodes(
   nodes: GraphNode[],
-  edges: GraphEdge[]
+  edges: GraphEdge[],
+  existingCentrality?: Map<string, NodeCentrality>
 ): OrphanNode[] {
-  const centrality = computeCentrality(nodes, edges);
+  const centrality = existingCentrality || computeCentrality(nodes, edges);
   const orphans: OrphanNode[] = [];
 
   for (const n of nodes) {
-    // Ignore top-level project root, services, persons, or env configs
+    // Ignore top-level project root, external packages, placeholders, docs/rules, services, persons, or env configs
     if (
       n.properties?.is_project_root ||
+      n.properties?.is_external ||
+      n.properties?.placeholder ||
       n.node_type === "service" ||
       n.node_type === "person" ||
       n.node_type === "env_config" ||
-      n.id.startsWith("project:")
+      n.node_type === "policy" ||
+      n.node_type === "rule" ||
+      n.node_type === "general" ||
+      n.node_type === "template" ||
+      n.node_type === "api_endpoint" ||
+      n.id.startsWith("project:") ||
+      n.id.startsWith("doc:")
     ) {
+      continue;
+    }
+
+    const filePath = (n.properties?.file_path as string | undefined) || "";
+    if (n.node_type === "module" && filePath && ENTRYPOINT_FILE.test(filePath)) {
       continue;
     }
 
@@ -171,7 +208,7 @@ export function detectOrphanNodes(
         label: n.label,
         node_type: n.node_type,
         summary: n.summary,
-        file_path: n.properties?.file_path as string | undefined,
+        file_path: filePath || undefined,
         line: n.properties?.line as number | undefined,
       });
     }
@@ -186,19 +223,21 @@ export function detectOrphanNodes(
 export function auditArchitecture(
   projectId: string,
   nodes: GraphNode[],
-  edges: GraphEdge[]
+  edges: GraphEdge[],
+  existingCentrality?: Map<string, NodeCentrality>
 ): ArchitectureAuditReport {
   const cycles = detectCircularDependencies(nodes, edges);
-  const orphanNodes = detectOrphanNodes(nodes, edges);
+  const orphanNodes = detectOrphanNodes(nodes, edges, existingCentrality);
 
-  // Compute Health Score (100 is perfect)
-  // Deduct 10 points per circular dependency (critical architecture smell)
-  // Deduct 1 point per 5 orphan nodes (potential dead code)
-  let penalty = cycles.length * 10 + Math.floor(orphanNodes.length / 5);
+  // Compute Health Score (100 is perfect), scaled by project size
+  const cycleWeight = nodes.length > 500 ? 3 : nodes.length > 100 ? 6 : 10;
+  const cyclePenalty = Math.min(60, cycles.length * cycleWeight);
+  const orphanPenalty = Math.min(25, Math.floor(orphanNodes.length / 5));
+  const penalty = cyclePenalty + orphanPenalty;
   const healthScore = Math.max(0, Math.min(100, 100 - penalty));
 
   let status: "healthy" | "warning" | "critical" = "healthy";
-  if (cycles.length > 3 || healthScore < 60) {
+  if (healthScore < 60) {
     status = "critical";
   } else if (cycles.length > 0 || orphanNodes.length > 10 || healthScore < 85) {
     status = "warning";

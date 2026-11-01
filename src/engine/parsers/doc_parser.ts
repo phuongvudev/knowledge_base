@@ -7,6 +7,8 @@ export interface DocumentSection {
   title: string;
   content: string;
   page?: number;
+  line?: number;
+  endLine?: number;
   sectionType: "policy" | "process" | "rule" | "template" | "general";
   rolesMentioned: string[];
   rulesExtracted: string[];
@@ -71,13 +73,16 @@ export class DocumentParser {
 
     let currentTitle = `${fileName} - Overview`;
     let currentContent: string[] = [];
+    let currentStartLine = 1;
     let pageNum = 1;
 
     // Regex for structural headers:
     // Markdown # Header, or Vietnamese "Điều 1:", "Chương I:", "Mục 2:", "Article 1"
     const headerRegex = /^(?:#{1,3}\s+|Điều\s+\d+|Chương\s+[IVXLCDM\d]+|Mục\s+\d+|Article\s+\d+)(.*)/i;
 
-    for (const rawLine of lines) {
+    for (let idx = 0; idx < lines.length; idx++) {
+      const rawLine = lines[idx];
+      const lineNum = idx + 1;
       const line = rawLine.trim();
 
       // Simple page marker heuristic
@@ -88,14 +93,17 @@ export class DocumentParser {
       }
 
       const match = line.match(headerRegex);
-      if (match && currentContent.length > 0) {
-        // Flush previous section
-        const text = currentContent.join("\n").trim();
-        if (text.length > 20) {
-          sections.push(this.classifySection(currentTitle, text, pageNum));
+      if (match) {
+        if (currentContent.length > 0) {
+          // Flush previous section
+          const text = currentContent.join("\n").trim();
+          if (text.length > 20) {
+            sections.push(this.classifySection(currentTitle, text, pageNum, currentStartLine, Math.max(currentStartLine, lineNum - 1)));
+          }
         }
         currentTitle = line.replace(/^#{1,3}\s+/, "").trim();
         currentContent = [];
+        currentStartLine = lineNum;
       } else {
         if (line.length > 0) {
           currentContent.push(line);
@@ -106,7 +114,7 @@ export class DocumentParser {
     if (currentContent.length > 0) {
       const text = currentContent.join("\n").trim();
       if (text.length > 20) {
-        sections.push(this.classifySection(currentTitle, text, pageNum));
+        sections.push(this.classifySection(currentTitle, text, pageNum, currentStartLine, lines.length));
       }
     }
 
@@ -115,6 +123,8 @@ export class DocumentParser {
         title: fileName,
         content: fullText.slice(0, 2000),
         page: 1,
+        line: 1,
+        endLine: lines.length,
         sectionType: "general",
         rolesMentioned: [],
         rulesExtracted: [],
@@ -127,7 +137,9 @@ export class DocumentParser {
   private classifySection(
     title: string,
     text: string,
-    page: number
+    page: number,
+    line?: number,
+    endLine?: number
   ): DocumentSection {
     const lower = (title + " " + text).toLowerCase();
 
@@ -165,6 +177,8 @@ export class DocumentParser {
       title,
       content: text,
       page,
+      line,
+      endLine,
       sectionType,
       rolesMentioned: roles.slice(0, 3),
       rulesExtracted: rules.slice(0, 3),

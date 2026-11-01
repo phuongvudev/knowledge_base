@@ -17,7 +17,8 @@ export type NodeType =
   | "person"
   | "policy"
   | "process"
-  | "template";
+  | "template"
+  | "general";
 
 export type RelationType =
   | "DEPENDS_ON"

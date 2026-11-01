@@ -212,7 +212,7 @@ export default function KnowledgeStudioPage() {
                 : "text-slate-300 hover:text-white"
             }`}
           >
-            <UploadCloud className="w-3.5 h-3.5" /> Nạp Dữ Liệu
+            <UploadCloud className="w-3.5 h-3.5" /> Đồng Bộ & Ghi Chú
           </button>
 
           <button

@@ -73,6 +73,74 @@ export function persistExtraction(
       upsertEdge.run(e.project_id, e.source_id, e.target_id, e.relation_type, e.description ?? null, e.weight || 1.0, filePath);
     }
 
+    // Resolve cross-file symbol CALLS edges (both outbound to imported files and inbound from importer files)
+    const extraEdges: Array<{ project_id: string; source_id: string; target_id: string; relation_type: any; description: string; weight: number }> = [];
+    const nodeExistsStmt = db.prepare(`SELECT 1 FROM graph_nodes WHERE id = ?`);
+    const existingProjectNodes = graphMemory.getProjectNodes(projectId);
+
+    const importedFiles = new Set<string>(
+      result.nodes
+        .filter((n) => n.properties?.placeholder && typeof n.properties?.file_path === "string")
+        .map((n) => n.properties.file_path as string)
+    );
+    if (importedFiles.size > 0) {
+      const importedSymbolByName = new Map<string, string>();
+      for (const sym of existingProjectNodes) {
+        if (sym.node_type !== "module" && !sym.properties?.placeholder && importedFiles.has(sym.properties?.file_path)) {
+          importedSymbolByName.set(sym.label, sym.id);
+        }
+      }
+      if (importedSymbolByName.size > 0) {
+        for (const n of result.nodes) {
+          const calls = n.properties?.calls as string[] | undefined;
+          if (!Array.isArray(calls) || n.node_type === "module") continue;
+          for (const callee of calls) {
+            const targetId = importedSymbolByName.get(callee);
+            if (targetId && targetId !== n.id && nodeExistsStmt.get(targetId)) {
+              upsertEdge.run(projectId, n.id, targetId, "CALLS", `Calls ${callee}`, 1.0, filePath);
+              extraEdges.push({ project_id: projectId, source_id: n.id, target_id: targetId, relation_type: "CALLS", description: `Calls ${callee}`, weight: 1.0 });
+            }
+          }
+        }
+      }
+    }
+
+    const fileModuleNode = result.nodes.find((n) => n.node_type === "module" && !n.properties?.placeholder && !n.properties?.is_external);
+    if (fileModuleNode) {
+      const newSymbolByName = new Map<string, string>();
+      for (const n of result.nodes) {
+        if (n.node_type !== "module" && !n.properties?.placeholder && !n.properties?.is_external) {
+          newSymbolByName.set(n.label, n.id);
+        }
+      }
+      if (newSymbolByName.size > 0) {
+        const importerFiles = new Set<string>();
+        for (const m of existingProjectNodes) {
+          if (m.node_type === "module" && m.properties?.file_path && m.properties.file_path !== filePath) {
+            const intImps = m.properties?.internal_imports as string[] | undefined;
+            if (Array.isArray(intImps) && intImps.includes(fileModuleNode.id)) {
+              importerFiles.add(m.properties.file_path);
+            }
+          }
+        }
+        if (importerFiles.size > 0) {
+          for (const callerSym of existingProjectNodes) {
+            const callerFile = callerSym.properties?.file_path as string | undefined;
+            const calls = callerSym.properties?.calls as string[] | undefined;
+            if (!callerFile || !importerFiles.has(callerFile) || !Array.isArray(calls) || callerSym.node_type === "module") continue;
+            if (!nodeExistsStmt.get(callerSym.id)) continue;
+            for (const callee of calls) {
+              const targetId = newSymbolByName.get(callee);
+              if (targetId && targetId !== callerSym.id) {
+                upsertEdge.run(projectId, callerSym.id, targetId, "CALLS", `Calls ${callee}`, 1.0, callerFile);
+                extraEdges.push({ project_id: projectId, source_id: callerSym.id, target_id: targetId, relation_type: "CALLS", description: `Calls ${callee}`, weight: 1.0 });
+              }
+            }
+          }
+        }
+      }
+    }
+
     // Drop the old source first (cascades its node_sources) so "still sourced" only counts other files
     if (oldSourceIds.length) db.prepare(`DELETE FROM raw_sources WHERE id IN (${inOld})`).run(...oldSourceIds);
 
@@ -95,6 +163,7 @@ export function persistExtraction(
       graphMemory.addNodeMemory(n);
     }
     for (const e of result.edges) graphMemory.addEdgeMemory(e);
+    for (const e of extraEdges) graphMemory.addEdgeMemory(e);
   } catch (err) {
     db.exec("ROLLBACK");
     throw err;

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { builtinModules } from "node:module";
 import type { DatabaseInstance } from "../database.js";
+import { graphMemory } from "./graph_memory.js";
 import { codeParser } from "./parsers/code_parser.js";
 
 export interface Dep {
@@ -58,15 +59,40 @@ export function locate(name: string, fromFile: string): string | null {
 
 /** Third-party packages a project imports, most used first, with where their source lives and whether it is indexed. */
 export function listDeps(db: DatabaseInstance, projectId: string): Dep[] {
-  const rows = db
-    .prepare(`SELECT file_path, content FROM raw_sources WHERE project_id = ? AND source_type IN ('ts','tsx','js','jsx','mjs','dart') AND content IS NOT NULL`)
-    .all(projectId) as { file_path: string; content: string }[];
   const used = new Map<string, { files: number; from: string }>();
-  for (const r of rows) {
-    if (TEST_FILE.test(r.file_path)) continue; // dev-only imports (the test package, mocks) are not worth indexing
-    const names = new Set(codeParser.parseImports(r.file_path, r.content).external.map(packageName).filter(Boolean) as string[]);
-    for (const n of names) used.set(n, { files: (used.get(n)?.files ?? 0) + 1, from: used.get(n)?.from ?? r.file_path });
+  const cachedFiles = new Set<string>();
+
+  for (const node of graphMemory.getProjectNodes(projectId)) {
+    const fp = node.properties?.file_path as string | undefined;
+    const extImps = node.properties?.external_imports as string[] | undefined;
+    if (node.node_type !== "module" || !fp || !Array.isArray(extImps)) continue;
+    cachedFiles.add(fp);
+    if (TEST_FILE.test(fp)) continue;
+    const names = new Set(extImps.map(packageName).filter(Boolean) as string[]);
+    for (const n of names) used.set(n, { files: (used.get(n)?.files ?? 0) + 1, from: used.get(n)?.from ?? fp });
   }
+
+  const totalSources = (
+    db
+      .prepare(
+        `SELECT COUNT(*) AS c FROM raw_sources WHERE project_id = ? AND source_type IN ('ts','tsx','js','jsx','mjs','dart') AND content IS NOT NULL`
+      )
+      .get(projectId) as { c: number }
+  ).c;
+
+  if (cachedFiles.size < totalSources) {
+    const rows = db
+      .prepare(
+        `SELECT file_path, content FROM raw_sources WHERE project_id = ? AND source_type IN ('ts','tsx','js','jsx','mjs','dart') AND content IS NOT NULL`
+      )
+      .all(projectId) as { file_path: string; content: string }[];
+    for (const r of rows) {
+      if (cachedFiles.has(r.file_path) || TEST_FILE.test(r.file_path)) continue;
+      const names = new Set(codeParser.parseImports(r.file_path, r.content).external.map(packageName).filter(Boolean) as string[]);
+      for (const n of names) used.set(n, { files: (used.get(n)?.files ?? 0) + 1, from: used.get(n)?.from ?? r.file_path });
+    }
+  }
+
   const indexed = db.prepare(`SELECT project_id FROM raw_sources WHERE file_path LIKE ? ESCAPE '\\' LIMIT 1`);
   return [...used.entries()]
     .map(([name, u]) => {

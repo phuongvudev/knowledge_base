@@ -212,7 +212,7 @@ export async function handleIngestionTool(
 
     syncProjectLexicon(db, project_id, dir_path);
 
-    const validExts = extensions || [".pdf", ".docx", ".md", ".txt", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".py", ".dart", ".json", ".sql"];
+    const validExts = extensions || [".pdf", ".docx", ".md", ".txt", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".py", ".dart", ".kt", ".kts", ".swift", ".json", ".sql", ".yaml", ".yml"];
     // Generated code, build output and whatever the user lists in .kbignore (or passes as `ignore`) is noise to an agent
     const ignored = loadIgnore(dir_path, ignore);
     const MAX_BYTES = 1_000_000;

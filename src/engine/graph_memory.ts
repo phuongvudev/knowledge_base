@@ -1,22 +1,36 @@
 import { DatabaseInstance } from "../database.js";
 import { GraphEdge, GraphNode } from "../types.js";
+import { computeCentrality, NodeCentrality } from "./pagerank.js";
 
 export class GraphMemoryCache {
   private nodes = new Map<string, GraphNode>();
   private outEdges = new Map<string, Set<GraphEdge>>();
   private inEdges = new Map<string, Set<GraphEdge>>();
   private projectNodes = new Map<string, Set<string>>();
+  private centralityCache = new Map<string, Map<string, NodeCentrality>>();
 
   private dataVersion = -1;
   private signature = "";
 
-  private readVersion(db: DatabaseInstance) {
-    const v = (db.prepare("PRAGMA data_version").get() as any).data_version as number;
+  private invalidateCentrality(projectId?: string): void {
+    this.centralityCache.delete("__all__");
+    if (projectId) {
+      this.centralityCache.delete(projectId);
+    } else {
+      this.centralityCache.clear();
+    }
+  }
+
+  private readDataVersion(db: DatabaseInstance): number {
+    return (db.prepare("PRAGMA data_version").get() as any).data_version as number;
+  }
+
+  private readSignature(db: DatabaseInstance): string {
     const sig = db
       .prepare(`SELECT (SELECT COUNT(*) FROM graph_nodes) || ':' || (SELECT COALESCE(MAX(updated_at), '') FROM graph_nodes)
                 || ':' || (SELECT COUNT(*) FROM graph_edges) AS sig`)
       .get() as any;
-    return { v, sig: sig.sig as string };
+    return sig.sig as string;
   }
 
   /**
@@ -24,18 +38,21 @@ export class GraphMemoryCache {
    * ANOTHER connection commits, so this is a no-op for our own writes; rehydrate only if the graph really changed.
    */
   public syncIfStale(db: DatabaseInstance): void {
-    const { v, sig } = this.readVersion(db);
+    const v = this.readDataVersion(db);
     if (v === this.dataVersion) return;
     this.dataVersion = v;
+    const sig = this.readSignature(db);
     if (sig !== this.signature) this.hydrate(db);
   }
 
   public hydrate(db: DatabaseInstance): void {
-    ({ v: this.dataVersion, sig: this.signature } = this.readVersion(db));
+    this.dataVersion = this.readDataVersion(db);
+    this.signature = this.readSignature(db);
     this.nodes.clear();
     this.outEdges.clear();
     this.inEdges.clear();
     this.projectNodes.clear();
+    this.centralityCache.clear();
 
     const nodeRows = db.prepare(`SELECT * FROM graph_nodes`).all() as any[];
     for (const row of nodeRows) {
@@ -72,6 +89,7 @@ export class GraphMemoryCache {
 
   public addNodeMemory(node: GraphNode): void {
     this.nodes.set(node.id, node);
+    this.invalidateCentrality(node.project_id);
 
     if (!this.projectNodes.has(node.project_id)) {
       this.projectNodes.set(node.project_id, new Set());
@@ -87,6 +105,7 @@ export class GraphMemoryCache {
   }
 
   public addEdgeMemory(edge: GraphEdge): void {
+    this.invalidateCentrality(edge.project_id);
     if (!this.outEdges.has(edge.source_id)) {
       this.outEdges.set(edge.source_id, new Set());
     }
@@ -101,6 +120,7 @@ export class GraphMemoryCache {
   public removeNode(id: string): void {
     const node = this.nodes.get(id);
     if (!node) return;
+    this.invalidateCentrality(node.project_id);
     for (const e of [...(this.outEdges.get(id) ?? []), ...(this.inEdges.get(id) ?? [])]) this.removeEdge(e);
     this.nodes.delete(id);
     this.outEdges.delete(id);
@@ -109,6 +129,7 @@ export class GraphMemoryCache {
   }
 
   public removeEdge(edge: { source_id: string; target_id: string; relation_type: string }): void {
+    this.invalidateCentrality(this.nodes.get(edge.source_id)?.project_id);
     for (const [map, key] of [[this.outEdges, edge.source_id], [this.inEdges, edge.target_id]] as const) {
       const set = map.get(key);
       if (!set) continue;
@@ -116,6 +137,68 @@ export class GraphMemoryCache {
         if (e.source_id === edge.source_id && e.target_id === edge.target_id && e.relation_type === edge.relation_type) set.delete(e);
       }
     }
+  }
+
+  public resolveProjectId(projectId?: string): string | undefined {
+    if (!projectId) return undefined;
+    if (this.projectNodes.has(projectId)) return projectId;
+
+    const clean = projectId.replace(/\/+$/, "").split("/").pop() || projectId;
+    if (this.projectNodes.has(clean)) return clean;
+
+    const norm = (s: string) => s.toLowerCase().replace(/[-_\s]+/g, "-");
+    const targetNorm = norm(clean);
+    for (const existing of this.projectNodes.keys()) {
+      if (norm(existing) === targetNorm) return existing;
+    }
+    return projectId;
+  }
+
+  public resolveNode(idOrQuery: string, projectId?: string): GraphNode | undefined {
+    const exact = this.nodes.get(idOrQuery);
+    if (exact) return exact;
+
+    const resolvedProj = this.resolveProjectId(projectId);
+    const pool = resolvedProj ? this.getProjectNodes(resolvedProj) : this.getAllNodes();
+    const q = idOrQuery.trim();
+    const qLower = q.toLowerCase();
+    const qSlug = qLower.replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+
+    // 1. Exact label match (case-insensitive, prefer non-module symbols then modules)
+    const labelHit = pool.find((n) => n.label.toLowerCase() === qLower && !n.properties?.placeholder);
+    if (labelHit) return labelHit;
+
+    // 2. File path or suffix match -> return the file's module node
+    const normPath = q.replace(/^\/+/, "");
+    const fileHit = pool.find((n) => {
+      if (n.node_type !== "module" || n.properties?.placeholder) return false;
+      const fp = n.properties?.file_path as string | undefined;
+      return fp && (fp === q || fp.endsWith("/" + normPath));
+    });
+    if (fileHit) return fileHit;
+
+    // 3. Node ID suffix match (e.g. ":telemetryengine" or "module:engine_telemetry_ts")
+    const suffixHit = pool.find(
+      (n) =>
+        !n.properties?.placeholder &&
+        (n.id.toLowerCase().endsWith(":" + qLower) ||
+          n.id.toLowerCase().endsWith(":" + qSlug) ||
+          n.id.toLowerCase() === "module:" + qSlug)
+    );
+    return suffixHit;
+  }
+
+  public getCentrality(projectId?: string): Map<string, NodeCentrality> {
+    const resolved = this.resolveProjectId(projectId);
+    const key = resolved || "__all__";
+    const cached = this.centralityCache.get(key);
+    if (cached) return cached;
+
+    const nodes = resolved ? this.getProjectNodes(resolved) : this.getAllNodes();
+    const edges = resolved ? this.getProjectEdges(resolved) : this.getAllEdges();
+    const computed = computeCentrality(nodes, edges);
+    this.centralityCache.set(key, computed);
+    return computed;
   }
 
   public getNode(id: string): GraphNode | undefined {
@@ -137,7 +220,8 @@ export class GraphMemoryCache {
   }
 
   public getProjectNodes(projectId: string): GraphNode[] {
-    const ids = this.projectNodes.get(projectId);
+    const resolved = this.resolveProjectId(projectId) || projectId;
+    const ids = this.projectNodes.get(resolved);
     if (!ids) return [];
     return Array.from(ids)
       .map((id) => this.nodes.get(id))
@@ -145,7 +229,8 @@ export class GraphMemoryCache {
   }
 
   public getProjectEdges(projectId: string): GraphEdge[] {
-    const projectNodeIds = this.projectNodes.get(projectId);
+    const resolved = this.resolveProjectId(projectId) || projectId;
+    const projectNodeIds = this.projectNodes.get(resolved);
     if (!projectNodeIds) return [];
 
     const edges: GraphEdge[] = [];
@@ -221,7 +306,7 @@ export class GraphMemoryCache {
     };
   }
 
-  public getImpactSubgraph(targetNodeId: string): {
+  public getImpactSubgraph(targetNodeId: string, maxDepth: number = 3): {
     affectedNodes: GraphNode[];
     paths: GraphEdge[];
   } {
@@ -232,17 +317,36 @@ export class GraphMemoryCache {
 
     const affectedIds = new Set<string>();
     const traversedEdges: GraphEdge[] = [];
-    const queue = [targetNodeId];
+    const queue: Array<{ id: string; depth: number }> = [{ id: targetNodeId, depth: 0 }];
+
+    const isPureBarrel = (node?: GraphNode) => {
+      if (!node || node.node_type !== "module") return false;
+      if (/no recognised definitions/i.test(node.summary)) return true;
+      const outDeps = this.outEdges.get(node.id)?.size ?? 0;
+      const inDeps = this.inEdges.get(node.id)?.size ?? 0;
+      return outDeps >= 20 && inDeps >= 15;
+    };
 
     while (queue.length > 0) {
-      const current = queue.shift()!;
+      const { id: current, depth } = queue.shift()!;
+      if (depth >= maxDepth) continue;
+
       const inbound = this.inEdges.get(current);
       if (inbound) {
-        for (const edge of inbound) {
+        // Prioritize direct CALLS edges before generic module DEPENDS_ON edges
+        const sortedInbound = [...inbound].sort((a, b) =>
+          (a.relation_type === "CALLS" ? 0 : 1) - (b.relation_type === "CALLS" ? 0 : 1)
+        );
+        for (const edge of sortedInbound) {
+          if (edge.source_id === targetNodeId) continue;
           if (!affectedIds.has(edge.source_id)) {
             affectedIds.add(edge.source_id);
             traversedEdges.push(edge);
-            queue.push(edge.source_id);
+            const srcNode = this.nodes.get(edge.source_id);
+            // Do not transitively expand through pure barrel/re-export hubs (prevents false-positive explosion)
+            if (!isPureBarrel(srcNode)) {
+              queue.push({ id: edge.source_id, depth: depth + 1 });
+            }
           }
         }
       }

@@ -6,7 +6,7 @@ import { depHint, linkedProjects, listDeps } from "../engine/deps.js";
 import { FileOutlineSchema, MetricsSchema, NodeGetSchema, SearchSchema, StatsSchema } from "../types.js";
 
 // Column weights: label and summary are what a person would search; the JSON properties blob is mostly paths
-const BM25 = "bm25(nodes_fts, 2.0, 10.0, 0.5, 4.0, 0.2, 0.3)";
+const BM25 = "bm25(nodes_fts, 2.0, 10.0, 0.5, 4.0, 0.2, 0.05)";
 const tokTokens = (t: string) => Math.ceil(t.length / 4);
 
 const STOPWORDS = new Set([
@@ -17,22 +17,26 @@ const STOPWORDS = new Set([
 
 // Universal Vietnamese action words -> common software equivalents; "" drops filler words
 const VI_EN: Array<[RegExp, string]> = [
-  [/ứng dụng|người dùng/giu, ""],
-  [/ghi nhớ|lưu trữ|lưu lại|\blưu\b/giu, "store save persist remember"],
-  [/đồng ý|chấp nhận|cho phép/giu, "consent accept allow"],
-  [/dữ liệu/giu, "data"],
-  [/\bgửi\b/giu, "send upload"],
-  [/xác thực|đăng nhập/giu, "auth login authenticate"],
-  [/đăng xuất/giu, "logout signout"],
-  [/thông báo/giu, "notification alert"],
-  [/thử lại/giu, "retry"],
-  [/mã hóa/giu, "encrypt crypto"],
-  [/bảo mật/giu, "security secret"],
-  [/\blỗi\b|ngoại lệ/giu, "error exception failure"],
-  [/cấu hình|thiết lập/giu, "config settings setup"],
-  [/đồng bộ/giu, "sync synchronize"],
-  [/xóa|hủy bỏ/giu, "delete remove discard"],
-  [/tìm kiếm|tra cứu/giu, "search query find lookup"],
+  [/(?<![\p{L}\p{N}_])(ứng dụng|người dùng|quản lý|xử lý|chức năng|hệ thống)(?![\p{L}\p{N}_])/giu, ""],
+  [/(?<![\p{L}\p{N}_])(ghi nhớ|lưu trữ|lưu lại|lưu)(?![\p{L}\p{N}_])/giu, "store save persist remember"],
+  [/(?<![\p{L}\p{N}_])(đồng ý|chấp nhận|cho phép)(?![\p{L}\p{N}_])/giu, "consent accept allow"],
+  [/(?<![\p{L}\p{N}_])(dữ liệu)(?![\p{L}\p{N}_])/giu, "data"],
+  [/(?<![\p{L}\p{N}_])(gửi)(?![\p{L}\p{N}_])/giu, "send upload"],
+  [/(?<![\p{L}\p{N}_])(sinh trắc học|vân tay|khuôn mặt)(?![\p{L}\p{N}_])/giu, "biometric fingerprint localauth"],
+  [/(?<![\p{L}\p{N}_])(xác thực|đăng nhập)(?![\p{L}\p{N}_])/giu, "auth login authenticate"],
+  [/(?<![\p{L}\p{N}_])(đăng xuất)(?![\p{L}\p{N}_])/giu, "logout signout"],
+  [/(?<![\p{L}\p{N}_])(thông báo|cảnh báo|nhắc nhở)(?![\p{L}\p{N}_])/giu, "notification alert reminder"],
+  [/(?<![\p{L}\p{N}_])(thử lại)(?![\p{L}\p{N}_])/giu, "retry"],
+  [/(?<![\p{L}\p{N}_])(mã hóa)(?![\p{L}\p{N}_])/giu, "encrypt crypto"],
+  [/(?<![\p{L}\p{N}_])(bảo mật)(?![\p{L}\p{N}_])/giu, "security secret"],
+  [/(?<![\p{L}\p{N}_])(lỗi|ngoại lệ)(?![\p{L}\p{N}_])/giu, "error exception failure"],
+  [/(?<![\p{L}\p{N}_])(cấu hình|thiết lập|cài đặt)(?![\p{L}\p{N}_])/giu, "config settings setup"],
+  [/(?<![\p{L}\p{N}_])(đồng bộ)(?![\p{L}\p{N}_])/giu, "sync synchronize"],
+  [/(?<![\p{L}\p{N}_])(tạo mới|thêm mới|tạo|thêm)(?![\p{L}\p{N}_])/giu, "create add insert"],
+  [/(?<![\p{L}\p{N}_])(cập nhật|chỉnh sửa|sửa)(?![\p{L}\p{N}_])/giu, "update edit modify"],
+  [/(?<![\p{L}\p{N}_])(xóa|hủy bỏ)(?![\p{L}\p{N}_])/giu, "delete remove discard"],
+  [/(?<![\p{L}\p{N}_])(tìm kiếm|tra cứu)(?![\p{L}\p{N}_])/giu, "search query find lookup"],
+  [/(?<![\p{L}\p{N}_])(định kỳ|lặp lại)(?![\p{L}\p{N}_])/giu, "recurring periodic repeat schedule"],
 ];
 // Universal developer synonyms: only used to widen the OR pass when exact match finds nothing
 const SYNONYMS: Array<[RegExp, string]> = [
@@ -54,7 +58,7 @@ function locationOf(node?: { properties?: Record<string, any> }): string | null 
 
 const TEST_PATH = /(^|\/)(tests?|testing|__tests__|integration_test)\/|[._]test\.|\.spec\./;
 // "(foo bar)" appended at index time only so FTS can match spelled-out identifiers; the agent doesn't need it
-const stripWords = (s: string) => s.replace(/ \([a-z0-9]+(?: [a-z0-9]+)+\)$/, "");
+const stripWords = (s: string) => s.replace(/ \([a-z0-9_.]+(?: [a-z0-9_.]+)*\)$/i, "");
 
 export async function handleQueryTool(
   name: string,
@@ -62,6 +66,7 @@ export async function handleQueryTool(
   db: DatabaseInstance
 ): Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean } | null> {
   const startTime = process.hrtime.bigint();
+  graphMemory.syncIfStale(db);
 
   const getNodeProvenanceStmt = db.prepare(`
     SELECT ns.*, rs.title, rs.file_path, rs.source_type, rs.content
@@ -74,13 +79,14 @@ export async function handleQueryTool(
   if (name === "kb_node_get") {
     const { node_id, include_raw } = NodeGetSchema.parse(args);
 
-    const node = graphMemory.getNode(node_id);
+    const node = graphMemory.resolveNode(node_id);
     if (!node) {
       return {
         content: [{ type: "text", text: `Node '${node_id}' not found.` }],
         isError: true,
       };
     }
+    const resolvedId = node.id;
 
     const lines: string[] = [
       `### ${node.label} (\`${node.id}\`)`,
@@ -97,9 +103,9 @@ export async function handleQueryTool(
     }
 
     // 360-degree Call Graph & Dependencies
-    const sub = graphMemory.getRadialSubgraph(node_id, 1, 15);
-    const outbound = sub.edges.filter((e) => e.source_id === node_id);
-    const inbound = sub.edges.filter((e) => e.target_id === node_id);
+    const sub = graphMemory.getRadialSubgraph(resolvedId, 1, 15);
+    const outbound = sub.edges.filter((e) => e.source_id === resolvedId);
+    const inbound = sub.edges.filter((e) => e.target_id === resolvedId);
 
     if (outbound.length > 0) {
       lines.push("");
@@ -122,7 +128,7 @@ export async function handleQueryTool(
     let rawTextEquivalent = node.summary;
 
     if (include_raw) {
-      const prov = getNodeProvenanceStmt.get(node_id) as any;
+      const prov = getNodeProvenanceStmt.get(resolvedId) as any;
       if (prov) {
         lines.push("");
         lines.push("#### Provenance & Raw Source Excerpt:");
@@ -134,8 +140,12 @@ export async function handleQueryTool(
         if (prov.content) {
           if (node.properties?.line) {
             const fileLines = prov.content.split("\n");
-            const startLine = Math.max(1, node.properties.line - 3);
-            const endLine = Math.min(fileLines.length, startLine + 30);
+            const hasEndLine = typeof node.properties?.end_line === "number";
+            const startLine = Math.max(1, node.properties.line - (hasEndLine ? 0 : 3));
+            const endLine = Math.min(
+              fileLines.length,
+              hasEndLine ? Math.min(node.properties.end_line, startLine + 40) : startLine + 30
+            );
             lines.push(fileLines.slice(startLine - 1, endLine).join("\n"));
           } else {
             lines.push(prov.content.slice(0, 1000));
@@ -164,21 +174,28 @@ export async function handleQueryTool(
   }
 
   if (name === "kb_search") {
-    const { query, project_id, limit, code, max_tokens } = SearchSchema.parse(args);
+    const parsed = SearchSchema.parse(args);
+    const { query, limit, code, max_tokens } = parsed;
+    const project_id = graphMemory.resolveProjectId(parsed.project_id);
 
-    // Keep unicode letters/digits (Vietnamese diacritics); quote each token so FTS operators can't break the query
-    let viQuery = VI_EN.reduce((q, [re, en]) => q.replace(re, ` ${en} `), query);
+    const conceptGroups: string[][] = [];
+    let remaining = query;
 
-    // Project-specific domain lexicon (strictly scoped to project_id)
+    // 1. Project-specific domain lexicon (Unicode word boundaries so 'định kỳ', 'số dư', 'khoản nợ' match properly)
     const projectExtra: string[] = [];
     if (project_id) {
       try {
         const rows = db.prepare("SELECT term, synonyms FROM project_lexicon WHERE project_id = ?").all(project_id) as Array<{ term: string; synonyms: string }>;
         for (const r of rows) {
-          const re = new RegExp(`\\b${r.term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "giu");
-          if (re.test(viQuery)) {
-            viQuery = viQuery.replace(re, ` ${r.synonyms} `);
-            projectExtra.push(...r.synonyms.split(/\s+/).filter(Boolean));
+          const escaped = r.term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const re = new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, "giu");
+          if (re.test(remaining)) {
+            remaining = remaining.replace(re, " ");
+            const syns = r.synonyms.split(/\s+/).filter(Boolean);
+            if (syns.length > 0) {
+              conceptGroups.push(syns);
+              projectExtra.push(...syns);
+            }
           }
         }
       } catch {
@@ -186,12 +203,33 @@ export async function handleQueryTool(
       }
     }
 
-    const all = viQuery.match(/[\p{L}\p{N}_]+/gu) || [];
-    // Question words drown the real keywords once AND falls back to OR
-    const content = all.filter((t) => t.length > 2 && !STOPWORDS.has(t.toLowerCase()));
-    const tokens = content.length ? content : all;
+    // 2. Universal Vietnamese -> English developer phrase mapping
+    for (const [re, en] of VI_EN) {
+      if (re.test(remaining)) {
+        remaining = remaining.replace(re, " ");
+        const syns = en.trim().split(/\s+/).filter(Boolean);
+        if (syns.length > 0) {
+          conceptGroups.push(syns);
+        }
+      }
+    }
+
+    // 3. Remaining standalone tokens
+    const remAll = remaining.match(/[\p{L}\p{N}_]+/gu) || [];
+    const remContent = remAll.filter((t) => t.length > 2 && !STOPWORDS.has(t.toLowerCase()));
+    const remTokens = remContent.length > 0 || conceptGroups.length > 0 ? remContent : remAll;
+    const seenTokens = new Set(conceptGroups.flat().map((t) => t.toLowerCase()));
+    for (const t of remTokens) {
+      if (!seenTokens.has(t.toLowerCase())) {
+        conceptGroups.push([t]);
+        seenTokens.add(t.toLowerCase());
+      }
+    }
+
+    const tokens = conceptGroups.flat();
+    const flatQueryForSynonyms = [query, ...tokens].join(" ");
     const extra = [
-      ...SYNONYMS.filter(([re]) => re.test(viQuery)).flatMap(([, add]) => add.split(" ")),
+      ...SYNONYMS.filter(([re]) => re.test(flatQueryForSynonyms)).flatMap(([, add]) => add.split(" ")),
       ...projectExtra,
     ];
     if (tokens.length === 0) {
@@ -201,24 +239,59 @@ export async function handleQueryTool(
       };
     }
 
-    const buildSql = (project: boolean, projects = 1) => project
-      ? `SELECT id, label, node_type, summary, ${BM25} AS score FROM nodes_fts
-         WHERE nodes_fts MATCH ? AND id IN (SELECT id FROM graph_nodes WHERE project_id IN (${Array(projects).fill("?").join(",")}))
-         ORDER BY ${BM25} LIMIT ?`
-      : `SELECT id, label, node_type, summary FROM nodes_fts
-         WHERE nodes_fts MATCH ?
-         ORDER BY ${BM25} LIMIT ?`;
+    const ftsStmt = db.prepare(`
+      SELECT id, label, node_type, summary, ${BM25} AS score
+      FROM nodes_fts
+      WHERE nodes_fts MATCH ?
+      ORDER BY ${BM25}
+    `);
 
-    // Prefix match on every token: try AND first, fall back to OR when nothing matches
+    const formatGroup = (g: string[]) =>
+      g.length === 1 ? `"${g[0]}"*` : `(${g.map((t) => `"${t}"*`).join(" OR ")})`;
+
+    // Multi-pass Concept-Grouped FTS5:
+    // Pass 1: Primary token of each concept ANDed in {id label summary domain} (avoids file_path folder name pollution)
+    // Pass 2: Full synonym group of each concept ANDed: (syn1 OR syn2) AND (syn3 OR syn4)
+    // Pass 3: If query mixed untranslated Vietnamese words with English concepts, AND only the English concept groups
+    // Pass 4: Fallback OR across all tokens + synonyms
     const search = (ids: string[], libs = new Set<string>()) => {
-      const run = (joiner: string) => {
-        // synonyms only widen the OR pass: they would make AND needlessly strict
-        const match = (joiner === " " ? tokens : [...new Set([...tokens, ...extra])]).map((t) => `"${t}"*`).join(joiner);
-        const params = ids.length ? [match, ...ids, limit * 4] : [match, limit * 4]; // headroom: placeholders and test files are dropped/demoted below
-        return db.prepare(buildSql(ids.length > 0, ids.length)).all(...params) as any[];
+      const allowedProjects = ids.length > 0 ? new Set(ids) : null;
+      const execFts = (expr: string, restrictCols = true) => {
+        const match = restrictCols ? `{id label summary domain} : (${expr})` : expr;
+        const rows = ftsStmt.all(match) as any[];
+        if (!allowedProjects) return rows.slice(0, limit * 4);
+        const filtered: any[] = [];
+        for (const r of rows) {
+          const proj = graphMemory.getNode(r.id)?.project_id;
+          if (proj && allowedProjects.has(proj)) {
+            filtered.push(r);
+            if (filtered.length >= limit * 4) break;
+          }
+        }
+        return filtered;
       };
-      let found = run(" ");
-      if (found.length === 0 && tokens.length > 1) found = run(" OR ");
+
+      const primaryExpr = conceptGroups.map((g) => `"${g[0]}"*`).join(" AND ");
+      const groupAndExpr = conceptGroups.map(formatGroup).join(" AND ");
+
+      let found = execFts(primaryExpr, true);
+      if (found.length === 0 && groupAndExpr !== primaryExpr) {
+        found = execFts(groupAndExpr, true);
+      }
+      // If mixed Vietnamese + English query failed AND because codebase is English-only, try ASCII/translated concept groups
+      const asciiGroups = conceptGroups.filter((g) => g.some((w) => /^[a-z0-9_]+$/i.test(w)));
+      if (found.length === 0 && asciiGroups.length > 0 && asciiGroups.length < conceptGroups.length) {
+        found = execFts(asciiGroups.map(formatGroup).join(" AND "), true);
+      }
+      if (found.length === 0 && conceptGroups.length > 1) {
+        const orTokens = [...new Set([...tokens, ...extra])];
+        found = execFts(orTokens.map((t) => `"${t}"*`).join(" OR "), true);
+      }
+      // Final fallback: include properties (file_path) column if symbol/summary columns had 0 hits
+      if (found.length === 0) {
+        const orTokens = [...new Set([...tokens, ...extra])];
+        found = execFts(orTokens.map((t) => `"${t}"*`).join(" OR "), false);
+      }
       // bm25 is negative (lower = better): a library hit must beat the project's own by a margin to rank above it
       const adj = (r: any) => r.score * (libs.has(graphMemory.getNode(r.id)?.project_id ?? "") ? 0.8 : 1);
       if (libs.size) found.sort((a, b) => adj(a) - adj(b));
@@ -338,7 +411,7 @@ export async function handleQueryTool(
       null,
       null,
       rendered,
-      rawSearchText(db, results.map((r) => r.id))
+      rawSearchText(db, results.slice(0, 3).map((r) => r.id), 10_000)
     );
 
     return {
@@ -360,7 +433,7 @@ export async function handleQueryTool(
     const clip = (t: string) => (t.length > 120 ? t.slice(0, 119) + "…" : t); // a large file's outline must stay cheap
     for (const n of hits) lines.push(`${n.properties?.line ?? "-"} ${n.id} — ${clip(stripWords(n.summary))}`);
     const rendered = lines.join("\n");
-    const { footer } = telemetry.record(name, startTime, null, null, rendered, rawSearchText(db, hits.map((n) => n.id)));
+    const { footer } = telemetry.record(name, startTime, null, null, rendered, rawSearchText(db, [hits[0].id], 32_000));
     return { content: [{ type: "text", text: rendered + footer }] };
   }
 
@@ -382,7 +455,7 @@ export async function handleQueryTool(
       domainCounts.set(n.domain, (domainCounts.get(n.domain) || 0) + 1);
     }
 
-    const centrality = computeCentrality(allNodes, allEdges);
+    const centrality = graphMemory.getCentrality(project_id);
     const topHubs = [...allNodes]
       .sort((a, b) => {
         const scA = centrality.get(a.id)?.score || 0;
@@ -469,14 +542,17 @@ export async function handleQueryTool(
   return null;
 }
 
-// What an agent without the graph would read: the source documents behind the matched nodes
-function rawSearchText(db: DatabaseInstance, ids: string[]): string {
+// What an agent without the graph would read: the source documents behind the matched nodes (bounded to realistic read window per file)
+function rawSearchText(db: DatabaseInstance, ids: string[], maxCharsPerFile = 10_000): string {
   if (ids.length === 0) return "";
   const rows = db
     .prepare(
-      `SELECT DISTINCT rs.content FROM node_sources ns JOIN raw_sources rs ON ns.source_id = rs.id
-       WHERE ns.node_id IN (${ids.map(() => "?").join(",")})`
+      `SELECT DISTINCT rs.id, MIN(LENGTH(rs.content), ?) AS capped_len
+       FROM node_sources ns JOIN raw_sources rs ON ns.source_id = rs.id
+       WHERE ns.node_id IN (${ids.map(() => "?").join(",")})
+       LIMIT 3`
     )
-    .all(...ids) as { content: string | null }[];
-  return rows.map((r) => r.content ?? "").join("\n");
+    .all(maxCharsPerFile, ...ids) as { id: number; capped_len: number | null }[];
+  const totalChars = rows.reduce((sum, r) => sum + (r.capped_len ?? 0), 0);
+  return "x".repeat(totalChars);
 }

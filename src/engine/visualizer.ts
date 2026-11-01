@@ -1,5 +1,5 @@
 import { GraphEdge, GraphNode, LevelOfDetail } from "../types.js";
-import { filterHubNodes } from "./pagerank.js";
+import { filterHubNodes, NodeCentrality } from "./pagerank.js";
 
 export class GraphVisualizer {
   private sanitizeId(id: string): string {
@@ -16,7 +16,8 @@ export class GraphVisualizer {
   public renderMermaid(
     nodes: GraphNode[],
     edges: GraphEdge[],
-    lod: LevelOfDetail = LevelOfDetail.LOD0_MACRO
+    lod: LevelOfDetail = LevelOfDetail.LOD0_MACRO,
+    existingCentrality?: Map<string, NodeCentrality>
   ): string {
     if (nodes.length === 0) {
       return "```mermaid\ngraph LR\n    Empty[\"No entities found\"]\n```";
@@ -27,12 +28,12 @@ export class GraphVisualizer {
     let omittedCount = 0;
 
     if (lod === LevelOfDetail.LOD0_MACRO && nodes.length > 12) {
-      const filtered = filterHubNodes(nodes, edges, 10);
+      const filtered = filterHubNodes(nodes, edges, 10, existingCentrality);
       displayNodes = filtered.hubNodes;
       displayEdges = filtered.hubEdges;
       omittedCount = filtered.otherCount;
     } else if (lod === LevelOfDetail.LOD1_MESO && nodes.length > 25) {
-      const filtered = filterHubNodes(nodes, edges, 20);
+      const filtered = filterHubNodes(nodes, edges, 20, existingCentrality);
       displayNodes = filtered.hubNodes;
       displayEdges = filtered.hubEdges;
       omittedCount = filtered.otherCount;
@@ -96,7 +97,8 @@ export class GraphVisualizer {
     nodes: GraphNode[],
     edges: GraphEdge[],
     title: string = "Topology Overview",
-    topK: number = 15
+    topK: number = 15,
+    existingCentrality?: Map<string, NodeCentrality>
   ): string {
     const counts = new Map<string, number>();
     for (const n of nodes) counts.set(n.node_type, (counts.get(n.node_type) ?? 0) + 1);
@@ -106,7 +108,7 @@ export class GraphVisualizer {
       "",
     ];
 
-    const { hubNodes, hubEdges, otherCount } = filterHubNodes(nodes, edges, topK);
+    const { hubNodes, hubEdges, otherCount } = filterHubNodes(nodes, edges, topK, existingCentrality);
     const clip = (t: string) => (t.length > 90 ? t.slice(0, 90).trimEnd() + "…" : t);
     for (const n of hubNodes) lines.push(`- \`${n.id}\` [${n.node_type}] ${n.label} — ${clip(n.summary)}`);
     if (otherCount > 0) lines.push(`+${otherCount} more (kb_search, kb_graph_explore)`);
