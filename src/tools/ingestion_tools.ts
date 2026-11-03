@@ -127,26 +127,38 @@ export async function handleIngestionTool(
     const tExtractStart = process.hrtime.bigint();
     let result;
     try {
-      result = await knowledgeExtractor.extractFromFile(project_id, file_path, domain);
+      const preloaded = knowledgeExtractor.readAndHashFile(file_path);
+      const existing = checkFileHashStmt.get(project_id, file_path) as any;
+      if (preloaded && existing && existing.file_hash === preloaded.fileHash) {
+        jobs.progress(db, jobId, { processed: 0, skipped: 1, failed: 0 });
+        jobs.finish(db, jobId);
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Skipped ${path.basename(file_path)}: content unchanged (SHA-256 match).`,
+            },
+          ],
+        };
+      }
+      result = await knowledgeExtractor.extractFromFile(project_id, file_path, domain, preloaded);
+      if (!preloaded && existing && existing.file_hash === result.fileHash) {
+        jobs.progress(db, jobId, { processed: 0, skipped: 1, failed: 0 });
+        jobs.finish(db, jobId);
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Skipped ${path.basename(file_path)}: content unchanged (SHA-256 match).`,
+            },
+          ],
+        };
+      }
     } catch (err: any) {
       jobs.finish(db, jobId, err?.message || String(err));
       throw err;
     }
     const extractDuration = Number(process.hrtime.bigint() - tExtractStart) / 1_000_000;
-
-    const existing = checkFileHashStmt.get(project_id, file_path) as any;
-    if (existing && existing.file_hash === result.fileHash) {
-      jobs.progress(db, jobId, { processed: 0, skipped: 1, failed: 0 });
-      jobs.finish(db, jobId);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Skipped ${path.basename(file_path)}: content unchanged (SHA-256 match).`,
-          },
-        ],
-      };
-    }
 
     persistExtraction(db, project_id, file_path, result);
 
@@ -179,8 +191,13 @@ export async function handleIngestionTool(
           removed++;
           continue;
         }
-        const result = await knowledgeExtractor.extractFromFile(project_id, f.file_path, "auto");
-        if (!force && result.fileHash === f.file_hash) {
+        const preloaded = !force ? knowledgeExtractor.readAndHashFile(f.file_path) : null;
+        if (!force && preloaded && preloaded.fileHash === f.file_hash) {
+          unchanged++;
+          continue;
+        }
+        const result = await knowledgeExtractor.extractFromFile(project_id, f.file_path, "auto", preloaded);
+        if (!force && !preloaded && result.fileHash === f.file_hash) {
           unchanged++;
           continue;
         }
@@ -245,15 +262,29 @@ export async function handleIngestionTool(
     let totalNodes = 0;
     let totalEdges = 0;
 
+    const existingMap = new Map<string, string>();
+    if (!force) {
+      const rows = db
+        .prepare(`SELECT file_path, file_hash FROM raw_sources WHERE project_id = ? AND file_path IS NOT NULL`)
+        .all(project_id) as Array<{ file_path: string; file_hash: string }>;
+      for (const r of rows) {
+        existingMap.set(r.file_path, r.file_hash);
+      }
+    }
+
     for (const filePath of filesToIngest) {
       if (jobs.isCancelled(db, jobId)) break;
       jobs.progress(db, jobId, { processed, skipped, failed, current: path.basename(filePath) });
       try {
-        const ext = path.extname(filePath).toLowerCase();
-        const result = await knowledgeExtractor.extractFromFile(project_id, filePath, "auto");
+        const existingHash = !force ? existingMap.get(filePath) : undefined;
+        const preloaded = existingHash ? knowledgeExtractor.readAndHashFile(filePath) : null;
+        if (!force && existingHash && preloaded && existingHash === preloaded.fileHash) {
+          skipped++;
+          continue;
+        }
 
-        const existing = checkFileHashStmt.get(project_id, filePath) as any;
-        if (!force && existing && existing.file_hash === result.fileHash) {
+        const result = await knowledgeExtractor.extractFromFile(project_id, filePath, "auto", preloaded);
+        if (!force && existingHash && !preloaded && existingHash === result.fileHash) {
           skipped++;
           continue;
         }

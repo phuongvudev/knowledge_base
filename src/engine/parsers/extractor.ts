@@ -1,4 +1,5 @@
 import { classifyDocument, isAutoDomain } from "./classifier.js";
+import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import { GraphEdge, GraphNode, NodeProvenance } from "../../types.js";
@@ -33,10 +34,22 @@ export class KnowledgeExtractor {
     return crypto.createHash("sha256").update(content).digest("hex");
   }
 
+  /**
+   * Read text files directly and compute SHA-256 hash without parsing AST or sections.
+   * Returns null for binary document formats (.pdf, .docx) whose hash is computed over extracted text.
+   */
+  public readAndHashFile(filePath: string): { content: string; fileHash: string } | null {
+    const ext = path.extname(filePath).toLowerCase();
+    if (ext === ".pdf" || ext === ".docx") return null;
+    const content = fs.readFileSync(filePath, "utf-8");
+    return { content, fileHash: this.computeFileHash(content) };
+  }
+
   public async extractFromFile(
     projectId: string,
     filePath: string,
-    domain: string = "general"
+    domain: string = "general",
+    preloaded?: { content: string; fileHash: string } | null
   ): Promise<ExtractionResult> {
     const ext = path.extname(filePath).toLowerCase();
     const fileName = path.basename(filePath);
@@ -44,19 +57,20 @@ export class KnowledgeExtractor {
     const isDocument = ext === ".pdf" || ext === ".docx" || ext === ".md" || ext === ".txt";
 
     if (isDocument) {
-      return this.extractFromDocument(projectId, filePath, domain);
+      return this.extractFromDocument(projectId, filePath, domain, preloaded);
     } else {
-      return this.extractFromCode(projectId, filePath, domain);
+      return this.extractFromCode(projectId, filePath, domain, preloaded);
     }
   }
 
   private async extractFromDocument(
     projectId: string,
     filePath: string,
-    domain: string
+    domain: string,
+    preloaded?: { content: string; fileHash: string } | null
   ): Promise<ExtractionResult> {
-    const { rawText, sections } = await documentParser.parseFile(filePath);
-    const fileHash = this.computeFileHash(rawText);
+    const { rawText, sections } = await documentParser.parseFile(filePath, preloaded?.content);
+    const fileHash = preloaded?.fileHash ?? this.computeFileHash(rawText);
     const fileName = path.basename(filePath);
     const cls = classifyDocument(rawText, fileName, path.extname(filePath));
     const autoDomain = isAutoDomain(domain);
@@ -196,11 +210,11 @@ export class KnowledgeExtractor {
   private async extractFromCode(
     projectId: string,
     filePath: string,
-    domain: string
+    domain: string,
+    preloaded?: { content: string; fileHash: string } | null
   ): Promise<ExtractionResult> {
-    const fs = await import("fs");
-    const content = fs.readFileSync(filePath, "utf-8");
-    const fileHash = this.computeFileHash(content);
+    const content = preloaded?.content ?? fs.readFileSync(filePath, "utf-8");
+    const fileHash = preloaded?.fileHash ?? this.computeFileHash(content);
     const fileName = path.basename(filePath);
     const cls = classifyDocument(content, fileName, path.extname(filePath));
     const autoDomain = isAutoDomain(domain);

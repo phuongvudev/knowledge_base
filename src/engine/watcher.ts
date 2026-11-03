@@ -110,19 +110,24 @@ export class KnowledgeWatcher {
           console.log(`[KnowledgeWatcher] 🗑️  Removed: ${path.relative(this.dirPath, filePath)}`);
           this.onSyncCallback?.("unlink", filePath);
         } else {
-          // Changed or Added
+          // Changed or Added: check if hash changed before parsing AST
+          const existing = this.db
+            .prepare(`SELECT file_hash FROM raw_sources WHERE project_id = ? AND file_path = ? ORDER BY id DESC LIMIT 1`)
+            .get(this.projectId, filePath) as { file_hash: string } | undefined;
+
+          const preloaded = existing ? knowledgeExtractor.readAndHashFile(filePath) : null;
+          if (existing && preloaded && existing.file_hash === preloaded.fileHash) {
+            continue; // Hash is identical, skip parsing
+          }
+
           const result = await knowledgeExtractor.extractFromFile(
             this.projectId,
             filePath,
-            "auto"
+            "auto",
+            preloaded
           );
 
-          // Check if hash changed to avoid redundant work
-          const existing = this.db
-            .prepare(`SELECT file_hash FROM raw_sources WHERE project_id = ? AND file_path = ?`)
-            .get(this.projectId, filePath) as { file_hash: string } | undefined;
-
-          if (existing && existing.file_hash === result.fileHash) {
+          if (existing && !preloaded && existing.file_hash === result.fileHash) {
             continue; // Hash is identical, no AST changes
           }
 

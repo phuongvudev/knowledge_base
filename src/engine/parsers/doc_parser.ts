@@ -15,7 +15,7 @@ export interface DocumentSection {
 }
 
 export class DocumentParser {
-  public async parseFile(filePath: string): Promise<{
+  public async parseFile(filePath: string, preloadedText?: string): Promise<{
     rawText: string;
     sections: DocumentSection[];
   }> {
@@ -27,7 +27,7 @@ export class DocumentParser {
       return this.parseDOCX(filePath);
     } else {
       // Plain text or Markdown
-      const content = fs.readFileSync(filePath, "utf-8");
+      const content = preloadedText ?? fs.readFileSync(filePath, "utf-8");
       return this.parseMarkdownOrText(filePath, content);
     }
   }
