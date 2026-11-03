@@ -17,9 +17,13 @@ export function persistExtraction(
 ): void {
   // Ids come from file path + symbol, so two projects can produce the same id (src/utils.ts in an app and in a
   // library). A node another project owns must never be overwritten: this project gets its own "@project" copy.
-  const owned = db.prepare(`SELECT 1 FROM graph_nodes WHERE id = ? AND project_id != ?`);
   const rename = new Map<string, string>();
-  for (const n of result.nodes) if (owned.get(n.id, projectId)) rename.set(n.id, `${n.id}@${projectId}`);
+  for (const n of result.nodes) {
+    const existingOwner = graphMemory.getNode(n.id)?.project_id;
+    if (existingOwner && existingOwner !== projectId) {
+      rename.set(n.id, `${n.id}@${projectId}`);
+    }
+  }
   if (rename.size) {
     const re = (id: string) => rename.get(id) ?? id;
     result = {
@@ -58,7 +62,9 @@ export function persistExtraction(
       VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`);
     const link = db.prepare(`INSERT OR IGNORE INTO node_sources (node_id, source_id, page_number, section_title) VALUES (?, ?, ?, ?)`);
 
+    const newNodeIds = new Set<string>();
     for (const n of result.nodes) {
+      newNodeIds.add(n.id);
       const stmt = n.properties?.placeholder ? placeholderNode : upsertNode;
       stmt.run(n.id, n.project_id, n.label, n.node_type, n.summary, n.domain, JSON.stringify(n.properties || {}), n.is_hub ? 1 : 0);
       if (n.provenance) link.run(n.id, sourceId, n.provenance.page ?? null, n.provenance.section ?? null);
@@ -75,8 +81,7 @@ export function persistExtraction(
 
     // Resolve cross-file symbol CALLS edges (both outbound to imported files and inbound from importer files)
     const extraEdges: Array<{ project_id: string; source_id: string; target_id: string; relation_type: any; description: string; weight: number }> = [];
-    const nodeExistsStmt = db.prepare(`SELECT 1 FROM graph_nodes WHERE id = ?`);
-    const existingProjectNodes = graphMemory.getProjectNodes(projectId);
+    const nodeExists = (id: string) => newNodeIds.has(id) || Boolean(graphMemory.getNode(id));
 
     const importedFiles = new Set<string>(
       result.nodes
@@ -85,9 +90,11 @@ export function persistExtraction(
     );
     if (importedFiles.size > 0) {
       const importedSymbolByName = new Map<string, string>();
-      for (const sym of existingProjectNodes) {
-        if (sym.node_type !== "module" && !sym.properties?.placeholder && importedFiles.has(sym.properties?.file_path)) {
-          importedSymbolByName.set(sym.label, sym.id);
+      for (const impFile of importedFiles) {
+        for (const sym of graphMemory.getNodesByFile(impFile, projectId)) {
+          if (sym.node_type !== "module" && !sym.properties?.placeholder) {
+            importedSymbolByName.set(sym.label, sym.id);
+          }
         }
       }
       if (importedSymbolByName.size > 0) {
@@ -96,7 +103,7 @@ export function persistExtraction(
           if (!Array.isArray(calls) || n.node_type === "module") continue;
           for (const callee of calls) {
             const targetId = importedSymbolByName.get(callee);
-            if (targetId && targetId !== n.id && nodeExistsStmt.get(targetId)) {
+            if (targetId && targetId !== n.id && nodeExists(targetId)) {
               upsertEdge.run(projectId, n.id, targetId, "CALLS", `Calls ${callee}`, 1.0, filePath);
               extraEdges.push({ project_id: projectId, source_id: n.id, target_id: targetId, relation_type: "CALLS", description: `Calls ${callee}`, weight: 1.0 });
             }
@@ -114,26 +121,20 @@ export function persistExtraction(
         }
       }
       if (newSymbolByName.size > 0) {
-        const importerFiles = new Set<string>();
-        for (const m of existingProjectNodes) {
-          if (m.node_type === "module" && m.properties?.file_path && m.properties.file_path !== filePath) {
-            const intImps = m.properties?.internal_imports as string[] | undefined;
-            if (Array.isArray(intImps) && intImps.includes(fileModuleNode.id)) {
-              importerFiles.add(m.properties.file_path);
-            }
-          }
-        }
-        if (importerFiles.size > 0) {
-          for (const callerSym of existingProjectNodes) {
-            const callerFile = callerSym.properties?.file_path as string | undefined;
-            const calls = callerSym.properties?.calls as string[] | undefined;
-            if (!callerFile || !importerFiles.has(callerFile) || !Array.isArray(calls) || callerSym.node_type === "module") continue;
-            if (!nodeExistsStmt.get(callerSym.id)) continue;
-            for (const callee of calls) {
-              const targetId = newSymbolByName.get(callee);
-              if (targetId && targetId !== callerSym.id) {
-                upsertEdge.run(projectId, callerSym.id, targetId, "CALLS", `Calls ${callee}`, 1.0, callerFile);
-                extraEdges.push({ project_id: projectId, source_id: callerSym.id, target_id: targetId, relation_type: "CALLS", description: `Calls ${callee}`, weight: 1.0 });
+        const importerFiles = graphMemory.getImporterFiles(fileModuleNode.id);
+        if (importerFiles && importerFiles.size > 0) {
+          for (const callerFile of importerFiles) {
+            if (callerFile === filePath) continue;
+            for (const callerSym of graphMemory.getNodesByFile(callerFile, projectId)) {
+              const calls = callerSym.properties?.calls as string[] | undefined;
+              if (!Array.isArray(calls) || callerSym.node_type === "module") continue;
+              if (!nodeExists(callerSym.id)) continue;
+              for (const callee of calls) {
+                const targetId = newSymbolByName.get(callee);
+                if (targetId && targetId !== callerSym.id) {
+                  upsertEdge.run(projectId, callerSym.id, targetId, "CALLS", `Calls ${callee}`, 1.0, callerFile);
+                  extraEdges.push({ project_id: projectId, source_id: callerSym.id, target_id: targetId, relation_type: "CALLS", description: `Calls ${callee}`, weight: 1.0 });
+                }
               }
             }
           }

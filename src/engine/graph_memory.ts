@@ -7,6 +7,8 @@ export class GraphMemoryCache {
   private outEdges = new Map<string, Set<GraphEdge>>();
   private inEdges = new Map<string, Set<GraphEdge>>();
   private projectNodes = new Map<string, Set<string>>();
+  private nodesByFile = new Map<string, Set<string>>();
+  private importersOf = new Map<string, Set<string>>();
   private centralityCache = new Map<string, Map<string, NodeCentrality>>();
 
   private dataVersion = -1;
@@ -52,6 +54,8 @@ export class GraphMemoryCache {
     this.outEdges.clear();
     this.inEdges.clear();
     this.projectNodes.clear();
+    this.nodesByFile.clear();
+    this.importersOf.clear();
     this.centralityCache.clear();
 
     const nodeRows = db.prepare(`SELECT * FROM graph_nodes`).all() as any[];
@@ -88,6 +92,22 @@ export class GraphMemoryCache {
   }
 
   public addNodeMemory(node: GraphNode): void {
+    const prev = this.nodes.get(node.id);
+    if (prev) {
+      const prevFp = prev.properties?.file_path;
+      if (typeof prevFp === "string") {
+        this.nodesByFile.get(prevFp)?.delete(prev.id);
+        if (prev.node_type === "module" && Array.isArray(prev.properties?.internal_imports)) {
+          for (const imp of prev.properties.internal_imports as string[]) {
+            this.importersOf.get(imp)?.delete(prevFp);
+          }
+        }
+      }
+      if (prev.project_id !== node.project_id) {
+        this.projectNodes.get(prev.project_id)?.delete(prev.id);
+      }
+    }
+
     this.nodes.set(node.id, node);
     this.invalidateCentrality(node.project_id);
 
@@ -95,6 +115,27 @@ export class GraphMemoryCache {
       this.projectNodes.set(node.project_id, new Set());
     }
     this.projectNodes.get(node.project_id)!.add(node.id);
+
+    const fp = node.properties?.file_path;
+    if (typeof fp === "string") {
+      let fset = this.nodesByFile.get(fp);
+      if (!fset) {
+        fset = new Set();
+        this.nodesByFile.set(fp, fset);
+      }
+      fset.add(node.id);
+
+      if (node.node_type === "module" && Array.isArray(node.properties?.internal_imports)) {
+        for (const imp of node.properties.internal_imports as string[]) {
+          let iset = this.importersOf.get(imp);
+          if (!iset) {
+            iset = new Set();
+            this.importersOf.set(imp, iset);
+          }
+          iset.add(fp);
+        }
+      }
+    }
 
     if (!this.outEdges.has(node.id)) {
       this.outEdges.set(node.id, new Set());
@@ -121,6 +162,15 @@ export class GraphMemoryCache {
     const node = this.nodes.get(id);
     if (!node) return;
     this.invalidateCentrality(node.project_id);
+    const fp = node.properties?.file_path;
+    if (typeof fp === "string") {
+      this.nodesByFile.get(fp)?.delete(id);
+      if (node.node_type === "module" && Array.isArray(node.properties?.internal_imports)) {
+        for (const imp of node.properties.internal_imports as string[]) {
+          this.importersOf.get(imp)?.delete(fp);
+        }
+      }
+    }
     for (const e of [...(this.outEdges.get(id) ?? []), ...(this.inEdges.get(id) ?? [])]) this.removeEdge(e);
     this.nodes.delete(id);
     this.outEdges.delete(id);
@@ -203,6 +253,21 @@ export class GraphMemoryCache {
 
   public getNode(id: string): GraphNode | undefined {
     return this.nodes.get(id);
+  }
+
+  public getNodesByFile(filePath: string, projectId?: string): GraphNode[] {
+    const ids = this.nodesByFile.get(filePath);
+    if (!ids) return [];
+    const out: GraphNode[] = [];
+    for (const id of ids) {
+      const n = this.nodes.get(id);
+      if (n && (!projectId || n.project_id === projectId)) out.push(n);
+    }
+    return out;
+  }
+
+  public getImporterFiles(moduleId: string): ReadonlySet<string> | undefined {
+    return this.importersOf.get(moduleId);
   }
 
   public getAllNodes(): GraphNode[] {
