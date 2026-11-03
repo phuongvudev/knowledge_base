@@ -78,6 +78,7 @@ export function initDatabase(dbPath?: string): DatabaseInstance {
 
     CREATE INDEX IF NOT EXISTS idx_edges_source ON graph_edges(source_id);
     CREATE INDEX IF NOT EXISTS idx_edges_target ON graph_edges(target_id);
+    CREATE INDEX IF NOT EXISTS idx_edges_project ON graph_edges(project_id);
     CREATE INDEX IF NOT EXISTS idx_nodes_domain ON graph_nodes(project_id, domain, node_type);
     CREATE INDEX IF NOT EXISTS idx_nodes_updated ON graph_nodes(updated_at);
 

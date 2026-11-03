@@ -393,34 +393,35 @@ export class GraphMemoryCache {
       return outDeps >= 20 && inDeps >= 15;
     };
 
-    while (queue.length > 0) {
-      const { id: current, depth } = queue.shift()!;
+    let head = 0;
+    while (head < queue.length) {
+      const { id: current, depth } = queue[head++];
       if (depth >= maxDepth) continue;
 
       const inbound = this.inEdges.get(current);
       if (inbound) {
-        // Prioritize direct CALLS edges before generic module DEPENDS_ON edges
-        const sortedInbound = [...inbound].sort((a, b) =>
-          (a.relation_type === "CALLS" ? 0 : 1) - (b.relation_type === "CALLS" ? 0 : 1)
-        );
-        for (const edge of sortedInbound) {
-          if (edge.source_id === targetNodeId) continue;
-          // Never traverse backward across containment edges (module CONTAINS component, or method CONTAINS chunk)
-          if (edge.relation_type === "CONTAINS" || edge.description?.toLowerCase().includes("contains")) {
-            continue;
-          }
-          const srcNode = this.nodes.get(edge.source_id);
-          // For symbol-level impact, ignore module-level containment and barrel dependencies
-          if (isSymbol && srcNode?.node_type === "module" && edge.relation_type !== "CALLS" && edge.relation_type !== "REFERENCES") {
-            continue;
-          }
+        // Prioritize direct CALLS edges before generic module DEPENDS_ON edges (two passes instead of allocating & sorting)
+        for (let pass = 0; pass < 2; pass++) {
+          for (const edge of inbound) {
+            if ((pass === 0) !== (edge.relation_type === "CALLS")) continue;
+            if (edge.source_id === targetNodeId) continue;
+            // Never traverse backward across containment edges (module CONTAINS component, or method CONTAINS chunk)
+            if (edge.relation_type === "CONTAINS" || edge.description?.toLowerCase().includes("contains")) {
+              continue;
+            }
+            const srcNode = this.nodes.get(edge.source_id);
+            // For symbol-level impact, ignore module-level containment and barrel dependencies
+            if (isSymbol && srcNode?.node_type === "module" && edge.relation_type !== "CALLS" && edge.relation_type !== "REFERENCES") {
+              continue;
+            }
 
-          if (!affectedIds.has(edge.source_id)) {
-            affectedIds.add(edge.source_id);
-            traversedEdges.push(edge);
-            // Do not transitively expand through pure barrel/re-export hubs (prevents false-positive explosion)
-            if (!isPureBarrel(srcNode)) {
-              queue.push({ id: edge.source_id, depth: depth + 1 });
+            if (!affectedIds.has(edge.source_id)) {
+              affectedIds.add(edge.source_id);
+              traversedEdges.push(edge);
+              // Do not transitively expand through pure barrel/re-export hubs (prevents false-positive explosion)
+              if (!isPureBarrel(srcNode)) {
+                queue.push({ id: edge.source_id, depth: depth + 1 });
+              }
             }
           }
         }

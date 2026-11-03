@@ -260,7 +260,11 @@ export async function handleIngestionTool(
 
     syncProjectLexicon(db, project_id, dir_path);
 
-    const validExts = extensions || [".pdf", ".docx", ".md", ".txt", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".py", ".dart", ".kt", ".kts", ".swift", ".json", ".sql", ".yaml", ".yml"];
+    const validExts = new Set(
+      (extensions || [".pdf", ".docx", ".md", ".txt", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".py", ".dart", ".kt", ".kts", ".swift", ".json", ".sql", ".yaml", ".yml"]).map((e) =>
+        e.startsWith(".") ? e.toLowerCase() : `.${e.toLowerCase()}`
+      )
+    );
     // Generated code, build output and whatever the user lists in .kbignore (or passes as `ignore`) is noise to an agent
     const ignored = loadIgnore(dir_path, ignore);
     const MAX_BYTES = 1_000_000;
@@ -269,15 +273,13 @@ export async function handleIngestionTool(
     const scanDir = (dir: string) => {
       const entries = fs.readdirSync(dir, { withFileTypes: true });
       for (const entry of entries) {
-        if (entry.name.startsWith(".") || ignored(path.join(dir, entry.name) + (entry.isDirectory() ? "/x" : ""))) {
-          continue;
-        }
+        if (entry.name.startsWith(".")) continue;
         const fullPath = path.join(dir, entry.name);
         if (entry.isDirectory()) {
-          scanDir(fullPath);
+          if (!ignored(fullPath + "/x")) scanDir(fullPath);
         } else if (entry.isFile()) {
           const ext = path.extname(entry.name).toLowerCase();
-          if (validExts.includes(ext) && fs.statSync(fullPath).size <= MAX_BYTES) {
+          if (validExts.has(ext) && !ignored(fullPath) && fs.statSync(fullPath).size <= MAX_BYTES) {
             filesToIngest.push(fullPath);
           }
         }
