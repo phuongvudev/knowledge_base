@@ -65,4 +65,22 @@ Baseline (Claude đo trước khi tối ưu, DB tạm, `kb_batch_ingest_director
 
 `syncIfStale` khi không đổi: ~0.02-0.05ms. Chi phí mỗi file: 2.8ms (31 file) → 4.2ms (319 file).
 
-(Gemini điền số sau tối ưu bên dưới)
+### Sau tối ưu (Gemini đo trên cùng 2 repo, DB tạm, `kb_batch_ingest_directory`, force=false):
+
+| Repo | Files | Cold (trước → sau) | Lần 2 không đổi (trước → sau) | Tăng tốc Lần 2 | Hydrate | Nodes / Edges | RSS |
+|---|---|---|---|---|---|---|---|
+| knowledge_base/src | 31 | 86ms → **80.3ms** | 35ms → **1.95ms** | **~18x** | 2.1ms | 428 / 887* | 104MB |
+| budgetable_v2/lib (Dart) | 319 | 1344ms → **956–1084ms** (~25% nhanh hơn) | 621ms → **18.0–19.6ms** | **~32x** | 26.2ms | **5582 / 12088** (giống hệt: `CALLS`=3176, `CONTAINS`=7501, `DEPENDS_ON`=1411, hash `aa8d0a290c66d19f`) | 246MB |
+
+*\*Lưu ý: `knowledge_base/src` tăng nhẹ số node/edge do chính các hàm helper mới thêm trong đợt tối ưu (`readAndHashFile`, `getNodesByFile`, `getImporterFiles`); trên repo cố định `budgetable_v2/lib`, số node (5582), số cạnh theo từng loại (`CALLS`: 3176, `CONTAINS`: 7501, `DEPENDS_ON`: 1411) và SHA-256 của toàn bộ tập node/edge (`b96a35ec3a6ba558` / `aa8d0a290c66d19f`) giống hệt 100% trước và sau tối ưu.*
+
+- **`syncIfStale`**:
+  - Khi `data_version` không đổi (no-op): **~0.0016ms**.
+  - Khi `data_version` thay đổi nhưng cần kiểm tra `readSignature` (trên DB 5582 nodes / 12088 edges): giảm từ **2.12ms → 1.04ms** (~2x nhanh hơn nhờ `idx_nodes_updated`).
+- **Chi phí mỗi file (Cold)**: giảm từ 4.2ms/file xuống **~3.0ms/file** ở quy mô 319 files (loại bỏ hoàn toàn độ phức tạp $O(N^2)$ khi phân giải cạnh `CALLS` liên file và gom batch transaction bằng `SAVEPOINT`).
+- **Chi phí mỗi file (Warm / Re-index không đổi)**: giảm từ 1.95ms/file xuống **~0.06ms/file** (bỏ qua đọc lại DB từng file và kiểm tra SHA-256 trước khi parse AST).
+
+### Đề xuất cho `nodes_fts` (Bước 5 - chỉ đề xuất, chưa đổi schema FTS)
+- Hiện tại `nodes_fts` đánh chỉ mục cả cột `properties` (chứa JSON `calls`, `internal_imports`, `file_path`) với trọng số BM25 `0.2`. Trong `query_tools.ts`, các lượt tìm kiếm chính (Pass 1–4) đã giới hạn cột `{id label summary domain}` và chỉ dùng `properties` ở lượt fallback cuối cùng khi tìm theo tên file/thư mục.
+- **Đề xuất**: Nếu muốn giảm kích thước FTS5 index (~35-45% dung lượng bảng `nodes_fts`) và tăng tốc `INSERT` trigger khi ingest mà không ảnh hưởng tìm kiếm theo đường dẫn, có thể tách riêng cột `file_path` (hoặc tra cứu đường dẫn qua index in-memory `nodesByFile` của `GraphMemoryCache`) và bỏ `properties` khỏi `nodes_fts`. Cần benchmark bộ truy vấn thực tế trước khi áp dụng vì sẽ thay đổi điểm BM25 ở nhánh fallback cuối.
+
