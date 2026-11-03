@@ -184,28 +184,59 @@ export async function handleIngestionTool(
     const files = (db.prepare(`SELECT file_path, file_hash FROM raw_sources WHERE project_id = ? AND file_path IS NOT NULL`).all(project_id) as { file_path: string; file_hash: string }[]);
     let updated = 0, removed = 0, unchanged = 0, failed = 0;
     const ignoredNow = dir_path ? loadIgnore(dir_path, ignore) : () => false;
-    for (const f of files) {
-      try {
-        if (!fs.existsSync(f.file_path) || (dir_path && f.file_path.startsWith(dir_path + path.sep) && ignoredNow(f.file_path))) {
-          removeFile(db, project_id, f.file_path);
-          removed++;
-          continue;
-        }
-        const preloaded = !force ? knowledgeExtractor.readAndHashFile(f.file_path) : null;
-        if (!force && preloaded && preloaded.fileHash === f.file_hash) {
-          unchanged++;
-          continue;
-        }
-        const result = await knowledgeExtractor.extractFromFile(project_id, f.file_path, "auto", preloaded);
-        if (!force && !preloaded && result.fileHash === f.file_hash) {
-          unchanged++;
-          continue;
-        }
-        persistExtraction(db, project_id, f.file_path, result);
-        updated++;
-      } catch {
-        failed++;
+    let inSyncTx = false;
+    let syncTxCount = 0;
+    const openSyncTx = () => {
+      if (!inSyncTx) {
+        db.exec("BEGIN");
+        inSyncTx = true;
+        syncTxCount = 0;
       }
+    };
+    const commitSyncTx = () => {
+      if (inSyncTx) {
+        db.exec("COMMIT");
+        inSyncTx = false;
+        syncTxCount = 0;
+      }
+    };
+    try {
+      for (const f of files) {
+        try {
+          if (!fs.existsSync(f.file_path) || (dir_path && f.file_path.startsWith(dir_path + path.sep) && ignoredNow(f.file_path))) {
+            commitSyncTx();
+            removeFile(db, project_id, f.file_path);
+            removed++;
+            continue;
+          }
+          const preloaded = !force ? knowledgeExtractor.readAndHashFile(f.file_path) : null;
+          if (!force && preloaded && preloaded.fileHash === f.file_hash) {
+            unchanged++;
+            continue;
+          }
+          const result = await knowledgeExtractor.extractFromFile(project_id, f.file_path, "auto", preloaded);
+          if (!force && !preloaded && result.fileHash === f.file_hash) {
+            unchanged++;
+            continue;
+          }
+          openSyncTx();
+          persistExtraction(db, project_id, f.file_path, result);
+          updated++;
+          syncTxCount++;
+          if (syncTxCount >= 50) commitSyncTx();
+        } catch {
+          failed++;
+        }
+      }
+      commitSyncTx();
+    } catch (err) {
+      if (inSyncTx) {
+        try {
+          db.exec("ROLLBACK");
+        } catch {}
+        graphMemory.hydrate(db);
+      }
+      throw err;
     }
     refreshLinks(db);
     const lines = [`Sync ${project_id}: ${updated} updated, ${removed} removed, ${unchanged} unchanged${failed ? `, ${failed} failed` : ""}`];
@@ -272,31 +303,76 @@ export async function handleIngestionTool(
       }
     }
 
-    for (const filePath of filesToIngest) {
-      if (jobs.isCancelled(db, jobId)) break;
-      jobs.progress(db, jobId, { processed, skipped, failed, current: path.basename(filePath) });
-      try {
-        const existingHash = !force ? existingMap.get(filePath) : undefined;
-        const preloaded = existingHash ? knowledgeExtractor.readAndHashFile(filePath) : null;
-        if (!force && existingHash && preloaded && existingHash === preloaded.fileHash) {
-          skipped++;
-          continue;
-        }
+    const BATCH_TX_SIZE = 50;
+    let inTx = false;
+    let txWriteCount = 0;
 
-        const result = await knowledgeExtractor.extractFromFile(project_id, filePath, "auto", preloaded);
-        if (!force && existingHash && !preloaded && existingHash === result.fileHash) {
-          skipped++;
-          continue;
-        }
-
-        persistExtraction(db, project_id, filePath, result);
-
-        processed++;
-        totalNodes += result.nodes.length;
-        totalEdges += result.edges.length;
-      } catch {
-        failed++;
+    const openTxIfNeeded = () => {
+      if (!inTx) {
+        db.exec("BEGIN");
+        inTx = true;
+        txWriteCount = 0;
       }
+    };
+    const commitTxIfNeeded = () => {
+      if (inTx) {
+        db.exec("COMMIT");
+        inTx = false;
+        txWriteCount = 0;
+      }
+    };
+
+    try {
+      for (let i = 0; i < filesToIngest.length; i++) {
+        const filePath = filesToIngest[i];
+        if (!inTx) {
+          if (jobs.isCancelled(db, jobId)) break;
+        }
+        try {
+          const existingHash = !force ? existingMap.get(filePath) : undefined;
+          const preloaded = existingHash ? knowledgeExtractor.readAndHashFile(filePath) : null;
+          if (!force && existingHash && preloaded && existingHash === preloaded.fileHash) {
+            skipped++;
+            continue;
+          }
+
+          const result = await knowledgeExtractor.extractFromFile(project_id, filePath, "auto", preloaded);
+          if (!force && existingHash && !preloaded && existingHash === result.fileHash) {
+            skipped++;
+            continue;
+          }
+
+          openTxIfNeeded();
+          persistExtraction(db, project_id, filePath, result);
+
+          processed++;
+          txWriteCount++;
+          totalNodes += result.nodes.length;
+          totalEdges += result.edges.length;
+
+          // Flush the very first file immediately so external job pollers observe running progress right away,
+          // then group subsequent writes into batches of BATCH_TX_SIZE.
+          if (processed === 1 || txWriteCount >= BATCH_TX_SIZE) {
+            commitTxIfNeeded();
+            jobs.progress(db, jobId, { processed, skipped, failed, current: path.basename(filePath) });
+            await new Promise<void>((r) => setTimeout(r, processed === 1 ? 8 : 1));
+            if (jobs.isCancelled(db, jobId)) break;
+          }
+        } catch {
+          failed++;
+        }
+      }
+      commitTxIfNeeded();
+    } catch (err) {
+      if (inTx) {
+        try {
+          db.exec("ROLLBACK");
+        } catch {
+          // ignore rollback error
+        }
+        graphMemory.hydrate(db);
+      }
+      throw err;
     }
     jobs.progress(db, jobId, { processed, skipped, failed });
     jobs.finish(db, jobId);

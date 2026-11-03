@@ -8,12 +8,17 @@ import { graphMemory } from "./graph_memory.js";
  * Store one file's extraction, replacing whatever an earlier index of the same file produced:
  * the old raw source, nodes that no longer exist in the file, and the edges the extractor wrote for it.
  * Edges added by hand (source_file IS NULL) are never touched.
+ *
+ * Uses a SAVEPOINT so it can run standalone or inside a batched outer transaction.
+ * If `deferCache` is provided, memory cache updates are queued into `deferCache` instead of
+ * applied immediately, so an outer transaction can apply them only after its own COMMIT.
  */
 export function persistExtraction(
   db: DatabaseInstance,
   projectId: string,
   filePath: string,
-  result: ExtractionResult
+  result: ExtractionResult,
+  deferCache?: Array<() => void>
 ): void {
   // Ids come from file path + symbol, so two projects can produce the same id (src/utils.ts in an app and in a
   // library). A node another project owns must never be overwritten: this project gets its own "@project" copy.
@@ -43,7 +48,7 @@ export function persistExtraction(
     .prepare(`SELECT source_id, target_id, relation_type FROM graph_edges WHERE source_file = ?`)
     .all(filePath) as { source_id: string; target_id: string; relation_type: string }[];
 
-  db.exec("BEGIN");
+  db.exec("SAVEPOINT sp_persist_file");
   try {
     db.prepare(`DELETE FROM graph_edges WHERE source_file = ?`).run(filePath);
 
@@ -154,19 +159,28 @@ export function persistExtraction(
       db.prepare(`DELETE FROM graph_nodes WHERE id = ?`).run(id);
       removed.push(id);
     }
-    db.exec("COMMIT");
+    db.exec("RELEASE SAVEPOINT sp_persist_file");
 
-    // Cache follows the DB only after the commit succeeded
-    for (const e of staleEdges) graphMemory.removeEdge(e);
-    for (const id of removed) graphMemory.removeNode(id);
-    for (const n of result.nodes) {
-      if (n.properties?.placeholder && graphMemory.getNode(n.id)) continue;
-      graphMemory.addNodeMemory(n);
+    const applyCache = () => {
+      for (const e of staleEdges) graphMemory.removeEdge(e);
+      for (const id of removed) graphMemory.removeNode(id);
+      for (const n of result.nodes) {
+        if (n.properties?.placeholder && graphMemory.getNode(n.id)) continue;
+        graphMemory.addNodeMemory(n);
+      }
+      for (const e of result.edges) graphMemory.addEdgeMemory(e);
+      for (const e of extraEdges) graphMemory.addEdgeMemory(e);
+    };
+
+    if (deferCache) {
+      deferCache.push(applyCache);
+    } else {
+      // Cache follows the DB only after the commit succeeded
+      applyCache();
     }
-    for (const e of result.edges) graphMemory.addEdgeMemory(e);
-    for (const e of extraEdges) graphMemory.addEdgeMemory(e);
   } catch (err) {
-    db.exec("ROLLBACK");
+    db.exec("ROLLBACK TO SAVEPOINT sp_persist_file");
+    db.exec("RELEASE SAVEPOINT sp_persist_file");
     throw err;
   }
 }
