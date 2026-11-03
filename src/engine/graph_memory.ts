@@ -15,8 +15,8 @@ export class GraphMemoryCache {
   private signature = "";
 
   private invalidateCentrality(projectId?: string): void {
-    this.centralityCache.delete("__all__");
     if (projectId) {
+      this.centralityCache.delete("__all__");
       this.centralityCache.delete(projectId);
     } else {
       this.centralityCache.clear();
