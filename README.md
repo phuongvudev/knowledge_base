@@ -140,6 +140,27 @@ Thêm vào file cấu hình MCP của client:
 }
 ```
 
+### 4. GitHub Copilot (VS Code & JetBrains / Android Studio)
+Chạy lệnh cài đặt tự động (cấu hình đồng thời cả `mcp.json` và `copilot-instructions.md` cho VS Code + JetBrains IDE):
+```bash
+npm run install:github_copilot
+```
+Hoặc thêm thủ công vào `~/Library/Application Support/Code/User/mcp.json` (VS Code) hoặc `~/.config/github-copilot/intellij/mcp.json` (JetBrains / Android Studio):
+```json
+{
+  "servers": {
+    "knowledge-base": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/Volumes/Data/station/personal/projects/knowledge_base/dist/index.js"],
+      "env": {
+        "KB_DB_PATH": "/Volumes/Data/station/personal/projects/knowledge_base/data/neural_knowledge.db"
+      }
+    }
+  }
+}
+```
+
 > [!TIP]
 > **Chế độ siêu tiết kiệm Token Khai Báo (`KB_TOOLSET=read`)**:  
 > Nếu bạn muốn tiết kiệm token hệ thống gửi mỗi lượt chat, hãy đặt biến môi trường `KB_TOOLSET=read`. Server sẽ chỉ expose 11 công cụ đọc cốt lõi (~700 tokens thay vì ~2.200 tokens).

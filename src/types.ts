@@ -32,7 +32,8 @@ export type RelationType =
   | "APPLIES_TO"
   | "APPROVED_BY"
   | "SUPERSEDES"
-  | "REFERENCES";
+  | "REFERENCES"
+  | "CONTAINS";
 
 export interface NodeProvenance {
   source_file: string;
@@ -40,6 +41,7 @@ export interface NodeProvenance {
   page?: number;
   section?: string;
   line?: number;
+  end_line?: number;
   extracted_at: string;
 }
 
@@ -205,7 +207,7 @@ export const AddNodeSchema = z.object({
     relation: z.enum([
       "DEPENDS_ON", "CALLS", "STORES_IN", "GOVERNED_BY",
       "CONFIGURED_BY", "OWNED_BY", "AFFECTS", "REQUIRES",
-      "APPLIES_TO", "APPROVED_BY", "SUPERSEDES", "REFERENCES"
+      "APPLIES_TO", "APPROVED_BY", "SUPERSEDES", "REFERENCES", "CONTAINS"
     ]),
     description: z.string().optional()
   })).optional().describe("Outbound links to existing nodes"),
@@ -218,7 +220,7 @@ export const AddRelationSchema = z.object({
   relation_type: z.enum([
     "DEPENDS_ON", "CALLS", "STORES_IN", "GOVERNED_BY",
     "CONFIGURED_BY", "OWNED_BY", "AFFECTS", "REQUIRES",
-    "APPLIES_TO", "APPROVED_BY", "SUPERSEDES", "REFERENCES"
+    "APPLIES_TO", "APPROVED_BY", "SUPERSEDES", "REFERENCES", "CONTAINS"
   ]).describe("Relation type"),
   description: z.string().optional().describe("Contextual note for this relationship"),
 });
@@ -263,6 +265,7 @@ export const SyncSchema = z.object({
   project_id: z.string().describe("Project whose indexed files should be refreshed"),
   dir_path: z.string().optional().describe("Also index files in this directory that are not indexed yet"),
   ignore: z.array(z.string()).optional().describe("Extra gitignore-style patterns to skip, on top of .kbignore"),
+  force: z.boolean().optional().default(false).describe("If true, forces re-parsing of all files regardless of unchanged SHA-256 hash"),
 });
 
 export const StatsSchema = z.object({

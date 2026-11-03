@@ -315,6 +315,7 @@ export class GraphMemoryCache {
       return { affectedNodes: [], paths: [] };
     }
 
+    const isSymbol = targetNode.node_type !== "module" && targetNode.node_type !== "project";
     const affectedIds = new Set<string>();
     const traversedEdges: GraphEdge[] = [];
     const queue: Array<{ id: string; depth: number }> = [{ id: targetNodeId, depth: 0 }];
@@ -339,10 +340,19 @@ export class GraphMemoryCache {
         );
         for (const edge of sortedInbound) {
           if (edge.source_id === targetNodeId) continue;
+          // Never traverse backward across containment edges (module CONTAINS component, or method CONTAINS chunk)
+          if (edge.relation_type === "CONTAINS" || edge.description?.toLowerCase().includes("contains")) {
+            continue;
+          }
+          const srcNode = this.nodes.get(edge.source_id);
+          // For symbol-level impact, ignore module-level containment and barrel dependencies
+          if (isSymbol && srcNode?.node_type === "module" && edge.relation_type !== "CALLS" && edge.relation_type !== "REFERENCES") {
+            continue;
+          }
+
           if (!affectedIds.has(edge.source_id)) {
             affectedIds.add(edge.source_id);
             traversedEdges.push(edge);
-            const srcNode = this.nodes.get(edge.source_id);
             // Do not transitively expand through pure barrel/re-export hubs (prevents false-positive explosion)
             if (!isPureBarrel(srcNode)) {
               queue.push({ id: edge.source_id, depth: depth + 1 });

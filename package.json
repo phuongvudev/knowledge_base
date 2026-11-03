@@ -25,6 +25,8 @@
     "install:cline": "tsx src/cli/installer.ts cline",
     "install:windsurf": "tsx src/cli/installer.ts windsurf",
     "install:antigravity": "tsx src/cli/installer.ts antigravity",
+    "install:github_copilot": "tsx src/cli/installer.ts github_copilot",
+    "install:copilot": "tsx src/cli/installer.ts github_copilot",
     "install:all": "tsx src/cli/installer.ts all"
   },
   "dependencies": {

@@ -19,6 +19,7 @@ export async function handleGraphTool(
   db: DatabaseInstance
 ): Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean } | null> {
   const startTime = process.hrtime.bigint();
+  graphMemory.syncIfStale(db);
 
   if (name === "kb_project_create") {
     const { project_id, name: projName, description, domain } = CreateProjectSchema.parse(args);

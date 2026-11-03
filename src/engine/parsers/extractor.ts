@@ -267,6 +267,8 @@ export class KnowledgeExtractor {
         properties: {
           file_path: filePath,
           line: item.line,
+          ...(item.end_line ? { end_line: item.end_line } : {}),
+          ...(item.name.includes("#L") ? { is_chunk: true } : {}),
           ...(item.doc ? { doc: item.doc } : {}),
           ...(item.calls?.length ? { calls: item.calls } : {}),
         },
@@ -275,19 +277,36 @@ export class KnowledgeExtractor {
           source_file: filePath,
           source_type: "code",
           line: item.line,
+          ...(item.end_line ? { end_line: item.end_line } : {}),
           extracted_at: new Date().toISOString(),
         },
       });
 
-      // Edge from Module to Component/Endpoint
+      // Edge from Module to Component/Endpoint (Containment, not caller dependency)
       edges.push({
         project_id: projectId,
         source_id: fileNodeId,
         target_id: itemNodeId,
-        relation_type: "DEPENDS_ON",
+        relation_type: "CONTAINS",
         description: `Module contains ${item.name}`,
         weight: 1.0,
       });
+
+      // If sub-block chunk, link parent entity -> chunk
+      if (item.name.includes("#L")) {
+        const parentName = item.name.split("#L")[0];
+        const parentId = localByName.get(parentName);
+        if (parentId && parentId !== itemNodeId) {
+          edges.push({
+            project_id: projectId,
+            source_id: parentId,
+            target_id: itemNodeId,
+            relation_type: "CONTAINS",
+            description: `Method sub-block ${item.name}`,
+            weight: 1.0,
+          });
+        }
+      }
 
       // Intra-file symbol calls
       for (const callee of item.calls || []) {

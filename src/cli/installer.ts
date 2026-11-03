@@ -6,8 +6,12 @@ interface TargetAgent {
   id: string;
   name: string;
   configPath: string;
+  rootKey?: "mcpServers" | "servers";
+  includeTypeStdio?: boolean;
+  extraConfigPaths?: string[];
   rulesSourcePath?: string;
   rulesDestPath?: string;
+  extraRulesDestPaths?: string[];
 }
 
 export function installPluginFor(targetArg: string) {
@@ -77,58 +81,102 @@ export function installPluginFor(targetArg: string) {
       id: "antigravity",
       name: "Antigravity",
       configPath: path.join(homeDir, ".gemini", "config", "plugins", "knowledge-base", "mcp_config.json"),
+      rulesSourcePath: path.join(rootDir, "agent-plugins", "antigravity", "rules", "AGENTS.md"),
+      rulesDestPath: path.join(homeDir, ".gemini", "config", "plugins", "knowledge-base", "rules", "AGENTS.md"),
+    },
+    github_copilot: {
+      id: "github_copilot",
+      name: "GitHub Copilot (VS Code & JetBrains / Android Studio)",
+      configPath: path.join(
+        homeDir,
+        "Library",
+        "Application Support",
+        "Code",
+        "User",
+        "mcp.json"
+      ),
+      rootKey: "servers",
+      includeTypeStdio: true,
+      extraConfigPaths: [
+        path.join(homeDir, ".config", "github-copilot", "intellij", "mcp.json"),
+      ],
+      rulesSourcePath: path.join(rootDir, "agent-plugins", "github-copilot", "copilot-instructions.md"),
+      rulesDestPath: path.join(rootDir, ".github", "copilot-instructions.md"),
+      extraRulesDestPaths: [
+        path.join(homeDir, ".copilot", "instructions", "knowledge-base.instructions.md"),
+        path.join(homeDir, ".config", "github-copilot", "intellij", "global-copilot-instructions.md"),
+      ],
     },
   };
 
+  const normalizedArg = targetArg === "copilot" || targetArg === "github-copilot" ? "github_copilot" : targetArg;
   const targetsToInstall =
-    targetArg === "all" ? Object.values(agents) : agents[targetArg] ? [agents[targetArg]] : [];
+    normalizedArg === "all"
+      ? Object.values(agents)
+      : agents[normalizedArg]
+      ? [agents[normalizedArg]]
+      : [];
 
   if (targetsToInstall.length === 0) {
     console.error(`❌ Unknown agent target: '${targetArg}'`);
-    console.log("Available options: claude | cursor | cline | windsurf | antigravity | all");
+    console.log("Available options: claude | cursor | cline | windsurf | antigravity | github_copilot | all");
     process.exit(1);
   }
 
   console.log("==========================================================");
-  console.log(`   📦 INSTALLING KNOWLEDGE BASE PLUGIN FOR: ${targetArg.toUpperCase()} `);
+  console.log(`   📦 INSTALLING KNOWLEDGE BASE PLUGIN FOR: ${normalizedArg.toUpperCase()} `);
   console.log("==========================================================\n");
 
   let successCount = 0;
 
   for (const agent of targetsToInstall) {
     try {
-      const configDir = path.dirname(agent.configPath);
-      if (!fs.existsSync(configDir)) {
-        fs.mkdirSync(configDir, { recursive: true });
-      }
+      const rootKey = agent.rootKey || "mcpServers";
+      const entryPayload = agent.includeTypeStdio
+        ? { type: "stdio", ...mcpServerConfig }
+        : mcpServerConfig;
 
-      // 1. Read existing config
-      let existingConfig: any = {};
-      if (fs.existsSync(agent.configPath)) {
-        try {
-          const raw = fs.readFileSync(agent.configPath, "utf-8");
-          existingConfig = JSON.parse(raw);
-        } catch {
-          existingConfig = {};
+      const allConfigPaths = [agent.configPath, ...(agent.extraConfigPaths || [])];
+      for (const cfgPath of allConfigPaths) {
+        const configDir = path.dirname(cfgPath);
+        if (!fs.existsSync(configDir)) {
+          fs.mkdirSync(configDir, { recursive: true });
         }
+
+        let existingConfig: any = {};
+        if (fs.existsSync(cfgPath)) {
+          try {
+            const raw = fs.readFileSync(cfgPath, "utf-8").trim();
+            if (raw) existingConfig = JSON.parse(raw);
+          } catch {
+            existingConfig = {};
+          }
+        }
+
+        if (!existingConfig[rootKey] || typeof existingConfig[rootKey] !== "object") {
+          existingConfig[rootKey] = {};
+        }
+
+        existingConfig[rootKey]["knowledge-base"] = entryPayload;
+        fs.writeFileSync(cfgPath, JSON.stringify(existingConfig, null, 2), "utf-8");
+        console.log(`✅ [${agent.name}] MCP Configuration applied!`);
+        console.log(`   Config File: ${cfgPath}`);
       }
 
-      if (!existingConfig.mcpServers) {
-        existingConfig.mcpServers = {};
-      }
-
-      // 2. Merge knowledge-base MCP server
-      existingConfig.mcpServers["knowledge-base"] = mcpServerConfig;
-
-      // 3. Write config back safely
-      fs.writeFileSync(agent.configPath, JSON.stringify(existingConfig, null, 2), "utf-8");
-      console.log(`✅ [${agent.name}] MCP Configuration applied successfully!`);
-      console.log(`   Config File: ${agent.configPath}`);
-
-      // 4. Copy rules to workspace if applicable
-      if (agent.rulesSourcePath && agent.rulesDestPath && fs.existsSync(agent.rulesSourcePath)) {
-        fs.copyFileSync(agent.rulesSourcePath, agent.rulesDestPath);
-        console.log(`   Agent Rules: Copied to ${agent.rulesDestPath}`);
+      // Copy rules to workspace and global instruction paths if applicable
+      if (agent.rulesSourcePath && fs.existsSync(agent.rulesSourcePath)) {
+        const allRuleDests = [
+          ...(agent.rulesDestPath ? [agent.rulesDestPath] : []),
+          ...(agent.extraRulesDestPaths || []),
+        ];
+        for (const dest of allRuleDests) {
+          const destDir = path.dirname(dest);
+          if (!fs.existsSync(destDir)) {
+            fs.mkdirSync(destDir, { recursive: true });
+          }
+          fs.copyFileSync(agent.rulesSourcePath, dest);
+          console.log(`   Agent Rules: Copied to ${dest}`);
+        }
       }
 
       console.log("");

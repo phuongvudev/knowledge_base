@@ -9,6 +9,7 @@ export interface ParsedCodeEntity {
   dependsOn: string[];
   storesIn: string[];
   line?: number;
+  end_line?: number;
   /** whole comment above the symbol: searchable, never shown in result lists */
   doc?: string;
 }
@@ -81,6 +82,61 @@ const words = (name: string) => {
 
 const describe = (signature: string, doc: string, name = "") =>
   ((doc ? `${signature} — ${doc}` : signature) + words(name)).replace(/\s+/g, " ").slice(0, MAX_SUMMARY);
+
+export function findMatchingParen(text: string, start: number): number {
+  let depth = 0;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "(") depth++;
+    else if (ch === ")") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+export function extractChunkSummary(lines: string[], fallbackName: string): string {
+  const text = lines.join("\n");
+  const strMatches: string[] = [];
+  const strRe = /['"]((?:\\.|[^'"\\]){8,250})['"]/g;
+  let m: RegExpExecArray | null;
+  while ((m = strRe.exec(text)) !== null) {
+    const clean = m[1]
+      .replace(/\\[nrt]/g, " ")
+      .replace(/\\(["'\\])/g, "$1")
+      .replace(/[\${}]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (clean.length >= 10 && !/^[a-zA-Z0-9_.-]+$/.test(clean)) {
+      strMatches.push(clean);
+      if (strMatches.length >= 3) break;
+    }
+  }
+
+  const comments: string[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if ((trimmed.startsWith("//") && !trimmed.startsWith("///")) || trimmed.startsWith("#")) {
+      const c = trimmed.replace(/^(\/\/|#)\s*/, "").trim();
+      if (c.length >= 8) {
+        comments.push(c);
+        if (comments.length >= 2) break;
+      }
+    }
+  }
+
+  const excerpts = [...strMatches, ...comments].map((s) => (s.length > 80 ? s.slice(0, 77) + "…" : s));
+  if (excerpts.length > 0) {
+    return excerpts.join(" · ");
+  }
+  const codeSample = lines
+    .map((l) => l.trim())
+    .filter((l) => l.length > 3 && !l.startsWith("//") && !l.startsWith("#") && !l.startsWith("}"))
+    .slice(0, 2)
+    .join("; ");
+  return codeSample ? codeSample.slice(0, 100) : fallbackName;
+}
 
 export interface FileImports {
   /** npm packages / node builtins */
@@ -212,12 +268,45 @@ export class CodeParser {
     const sortedByLine = [...entities].filter((e) => e.line).sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
     for (let i = 0; i < sortedByLine.length; i++) {
       const cur = sortedByLine[i];
-      if (cur.calls.length > 0) continue;
       const startLine = cur.line ?? 1;
-      const nextLine = sortedByLine[i + 1]?.line ?? Math.min(lines.length + 1, startLine + 400);
-      const bodySlice = lines.slice(startLine - 1, Math.min(nextLine - 1, startLine + 400)).join("\n");
-      cur.calls = extractCalls(bodySlice, cur.name);
+      const nextLine = sortedByLine[i + 1]?.line ?? (lines.length + 1);
+      cur.end_line = Math.max(startLine, nextLine - 1);
+      if (cur.calls.length === 0) {
+        const bodySlice = lines.slice(startLine - 1, Math.min(cur.end_line, startLine + 400)).join("\n");
+        cur.calls = extractCalls(bodySlice, cur.name);
+      }
     }
+
+    // Chunk long code entities (> 35 lines) into sub-blocks so embedded prompts, SQL, and strings are indexed
+    const chunks: ParsedCodeEntity[] = [];
+    const CHUNK_SIZE = 30;
+    const CHUNK_OVERLAP = 5;
+    for (const cur of sortedByLine) {
+      if (cur.kind === "api_endpoint" || cur.name.includes("#L")) continue;
+      const start = cur.line ?? 1;
+      const end = cur.end_line ?? start;
+      const length = end - start + 1;
+      if (length > 35) {
+        for (let cStart = start; cStart <= end; cStart += (CHUNK_SIZE - CHUNK_OVERLAP)) {
+          const cEnd = Math.min(end, cStart + CHUNK_SIZE - 1);
+          if (cEnd - cStart < 8 && cStart > start) break;
+          const chunkSlice = lines.slice(cStart - 1, cEnd);
+          const chunkSummary = extractChunkSummary(chunkSlice, `${cur.name}#L${cStart}-${cEnd}`);
+          chunks.push({
+            name: `${cur.name}#L${cStart}-${cEnd}`,
+            kind: "component",
+            summary: describe(`${cur.name} [L${cStart}-${cEnd}]: ${chunkSummary}`, "", cur.name),
+            calls: extractCalls(chunkSlice.join("\n"), cur.name),
+            dependsOn: [],
+            storesIn: [],
+            line: cStart,
+            end_line: cEnd,
+            doc: chunkSlice.join("\n").slice(0, 500),
+          });
+        }
+      }
+    }
+    entities.push(...chunks);
 
     if (ext !== ".py") {
       const starts = [0];
@@ -387,29 +476,77 @@ export class CodeParser {
     let m;
     while ((m = typeRe.exec(content)) !== null) {
       const [, mods, kw, name, base] = m;
-      if (name.startsWith("_")) continue; // private to the library; its public parent is enough
       const isService = /service|repository|bloc|cubit|controller/i.test(name);
       push(name, /enum|typedef/.test(kw) ? "data_model" : isService ? "service" : "component", `${(mods || "").trim()} ${kw} ${name}${base ? ` extends ${base.trim()}` : ""}`.trim(), m.index);
       if (kw === "class" || kw === "mixin") classes.push({ name, line: lineOf(content, m.index) });
     }
 
-    // Public methods (2-space indent): "Type name(args) {" or "=>"; skip private, control flow, constructors via Type == class name
-    const methodRe = /^  (?:static\s+|Future<[^>]*>\s+|Stream<[^>]*>\s+|[A-Z][\w<>?,. ]*\s+|void\s+|bool\s+|int\s+|double\s+|String\s+|Widget\s+)+([a-z]\w*)\s*(?:<[^>\n]*>)?\(([^)]*)\)\s*(?:async\*?\s*)?(?:\{|=>)/gm;
-    const SKIP = new Set(["if", "for", "while", "switch", "catch", "return", "build", "dispose", "initState"]);
-    while ((m = methodRe.exec(content)) !== null) {
-      if (SKIP.has(m[1])) continue;
+    const SKIP = new Set([
+      "if", "for", "while", "switch", "catch", "return", "throw", "yield", "await", "new",
+      "class", "mixin", "enum", "extension", "typedef",
+      "build", "dispose", "initState", "toString", "operator", "Function", "assert"
+    ]);
+
+    // Methods and getters inside classes (indented 2-4 spaces)
+    const methodDeclRe = /^[ \t]{2,4}(?:@\w+(?:\([^)]*\))?\s*)*(?:(?:static|external|abstract|override)\s+)*(?:(?:Future<[^>]*>|Stream<[^>]*>|[A-Za-z_][\w<>?,. ]*?)\s+)?(?:get\s+([A-Za-z_]\w*)|([A-Za-z_]\w*)\s*(?:<[^>\n]*>)?\s*\()/gm;
+    while ((m = methodDeclRe.exec(content)) !== null) {
+      const lineStart = content.lastIndexOf("\n", m.index) + 1;
+      const lineText = content.slice(lineStart, m.index + m[0].length).trim();
+      if (/^(?:return|throw|yield|await)\b/.test(lineText)) continue;
+
+      const isGetter = !!m[1];
+      const name = isGetter ? m[1] : m[2];
+      if (SKIP.has(name)) continue;
+
       const line = lineOf(content, m.index);
       const owner = [...classes].reverse().find((c) => c.line <= line);
-      if (!owner || line - owner.line > 600) continue;
-      const head = m[0].replace(/\s*(\{|=>)$/, "").replace(/\s+/g, " ").trim();
-      push(`${owner.name}.${m[1]}`, "component", `${owner.name}: ${head}`, m.index);
+      if (!owner || line - owner.line > 1000) continue;
+
+      if (isGetter) {
+        const after = content.slice(m.index + m[0].length, m.index + m[0].length + 40).trim();
+        if (/^(=>|\{)/.test(after)) {
+          push(`${owner.name}.${name}`, "component", `${owner.name}: get ${name}`, m.index);
+        }
+      } else {
+        const parenStart = content.indexOf("(", m.index + m[0].length - 1);
+        const parenEnd = findMatchingParen(content, parenStart);
+        if (parenEnd !== -1) {
+          const after = content.slice(parenEnd + 1, parenEnd + 50).trim();
+          if (/^(?:async\*?\s*|sync\*?\s*)?(=>|\{)/.test(after) || (after.startsWith(";") && /\b(abstract|external)\b/.test(lineText))) {
+            const rawHead = content.slice(m.index, parenEnd + 1).replace(/\s+/g, " ").trim();
+            push(`${owner.name}.${name}`, "component", `${owner.name}: ${rawHead}`, m.index);
+          }
+        }
+      }
     }
 
-    // Top-level functions and consts (no indent)
-    const fnRe = /^(?:Future<[^>]*>|Stream<[^>]*>|[A-Za-z_][\w<>?,. ]*?)\s+([a-z]\w*)\s*\(([^)]*)\)\s*(?:async\*?\s*)?(?:\{|=>)/gm;
-    while ((m = fnRe.exec(content)) !== null) {
-      if (SKIP.has(m[1]) || /^(return|else|new|await)\b/.test(m[0])) continue;
-      push(m[1], "component", m[0].replace(/\s*(\{|=>)$/, "").replace(/\s+/g, " ").trim(), m.index);
+    // Top-level functions and getters (0 indent)
+    const topFnRe = /^(?:@\w+(?:\([^)]*\))?\s*)*(?:(?:Future<[^>]*>|Stream<[^>]*>|[A-Za-z_][\w<>?,. ]*?)\s+)?(?:get\s+([A-Za-z_]\w*)|([A-Za-z_]\w*)\s*(?:<[^>\n]*>)?\s*\()/gm;
+    while ((m = topFnRe.exec(content)) !== null) {
+      const lineStart = content.lastIndexOf("\n", m.index) + 1;
+      const lineText = content.slice(lineStart, m.index + m[0].length).trim();
+      if (/^(?:return|throw|yield|await)\b/.test(lineText)) continue;
+
+      const isGetter = !!m[1];
+      const name = isGetter ? m[1] : m[2];
+      if (SKIP.has(name) || classes.some((c) => c.name === name)) continue;
+
+      if (isGetter) {
+        const after = content.slice(m.index + m[0].length, m.index + m[0].length + 40).trim();
+        if (/^(=>|\{)/.test(after)) {
+          push(name, "component", `get ${name}`, m.index);
+        }
+      } else {
+        const parenStart = content.indexOf("(", m.index + m[0].length - 1);
+        const parenEnd = findMatchingParen(content, parenStart);
+        if (parenEnd !== -1) {
+          const after = content.slice(parenEnd + 1, parenEnd + 50).trim();
+          if (/^(?:async\*?\s*|sync\*?\s*)?(=>|\{)/.test(after) || (after.startsWith(";") && /\bexternal\b/.test(lineText))) {
+            const rawHead = content.slice(m.index, parenEnd + 1).replace(/\s+/g, " ").trim();
+            push(name, "component", rawHead, m.index);
+          }
+        }
+      }
     }
 
     if (out.length === 0) {
@@ -504,7 +641,7 @@ export class CodeParser {
     const push = (name: string, kind: ParsedCodeEntity["kind"], sig: string, index: number) =>
       out.push({ name, kind, summary: describe(sig, docAbove(content, index), name), calls: [], dependsOn: [], storesIn: [], line: lineOf(content, index) });
 
-    const typeRe = /^[ \t]*(?:@\w+(?:\([^)]*\))?\s*)*((?:public|internal|open|abstract|sealed|data|enum|value|annotation)\s+)*(class|interface|object)\s+([A-Za-z_]\w*)(?:<[^>{]*>)?(?:\s*(?:\([^)]*\))?\s*:\s*([^{=\n]+))?/gm;
+    const typeRe = /^[ \t]*(?:@\w+(?:\([^)]*\))?\s*)*((?:public|internal|open|abstract|sealed|data|enum|value|annotation|private)\s+)*(class|interface|object)\s+([A-Za-z_]\w*)(?:<[^>{]*>)?(?:\s*(?:\([^)]*\))?\s*:\s*([^{=\n]+))?/gm;
     const classes: { name: string; line: number }[] = [];
     let m;
     while ((m = typeRe.exec(content)) !== null) {
@@ -520,15 +657,19 @@ export class CodeParser {
       classes.push({ name, line: lineOf(content, m.index) });
     }
 
-    const funRe = /^([ \t]*)(?:public\s+|open\s+|override\s+|suspend\s+|inline\s+|operator\s+)*fun\s+(?:<[^>\n]*>\s*)?(?:[A-Za-z0-9_<>?., ]+\.)?([A-Za-z_]\w*)\s*\(([^)]*)\)(?:\s*:\s*([^{=\n]+))?/gm;
+    const funRe = /^([ \t]*)(?:(?:public|internal|open|override|suspend|inline|operator|private|protected)\s+)*fun\s+(?:<[^>\n]*>\s*)?(?:[A-Za-z0-9_<>?., ]+\.)?([A-Za-z_]\w*)\s*(?:<[^>\n]*>)?\s*\(/gm;
     while ((m = funRe.exec(content)) !== null) {
-      if (/\b(private|protected)\b/.test(m[0])) continue;
       const indent = m[1].length;
       const fnName = m[2];
-      const params = m[3].replace(/\s+/g, " ").trim();
-      const ret = m[4]?.trim();
+      const parenStart = content.indexOf("(", m.index + m[0].length - 1);
+      const parenEnd = findMatchingParen(content, parenStart);
+      if (parenEnd === -1) continue;
+      const params = content.slice(parenStart + 1, parenEnd).replace(/\s+/g, " ").trim();
+      const after = content.slice(parenEnd + 1, parenEnd + 80);
+      const retMatch = after.match(/^\s*:\s*([^{=\n]+)/);
+      const ret = retMatch?.[1]?.trim();
       const line = lineOf(content, m.index);
-      const owner = indent > 0 ? [...classes].reverse().find((c) => c.line <= line && line - c.line <= 500) : undefined;
+      const owner = indent > 0 ? [...classes].reverse().find((c) => c.line <= line && line - c.line <= 600) : undefined;
       const fullName = owner ? `${owner.name}.${fnName}` : fnName;
       push(fullName, "component", `fun ${fullName}(${params})${ret ? `: ${ret}` : ""}`, m.index);
     }
@@ -550,7 +691,7 @@ export class CodeParser {
     const push = (name: string, kind: ParsedCodeEntity["kind"], sig: string, index: number) =>
       out.push({ name, kind, summary: describe(sig, docAbove(content, index), name), calls: [], dependsOn: [], storesIn: [], line: lineOf(content, index) });
 
-    const typeRe = /^[ \t]*(?:@\w+(?:\([^)]*\))?\s*)*((?:public|open|internal|final|indirect)\s+)*(class|struct|enum|protocol|actor)\s+([A-Za-z_]\w*)(?:<[^>{]*>)?(?:\s*:\s*([^{=\n]+))?/gm;
+    const typeRe = /^[ \t]*(?:@\w+(?:\([^)]*\))?\s*)*((?:public|open|internal|final|indirect|private|fileprivate)\s+)*(class|struct|enum|protocol|actor)\s+([A-Za-z_]\w*)(?:<[^>{]*>)?(?:\s*:\s*([^{=\n]+))?/gm;
     const classes: { name: string; line: number }[] = [];
     let m;
     while ((m = typeRe.exec(content)) !== null) {
@@ -566,15 +707,19 @@ export class CodeParser {
       classes.push({ name, line: lineOf(content, m.index) });
     }
 
-    const funcRe = /^([ \t]*)(?:public\s+|open\s+|static\s+|class\s+|override\s+|mutating\s+)*func\s+([A-Za-z_]\w*)\s*(?:<[^>\n]*>)?\(([^)]*)\)(?:\s*(?:async\s*)?(?:throws\s*)?(?:->\s*([^{=\n]+))?)?/gm;
+    const funcRe = /^([ \t]*)(?:(?:public|open|static|class|override|mutating|private|fileprivate)\s+)*func\s+([A-Za-z_]\w*)\s*(?:<[^>\n]*>)?\s*\(/gm;
     while ((m = funcRe.exec(content)) !== null) {
-      if (/\b(private|fileprivate)\b/.test(m[0])) continue;
       const indent = m[1].length;
       const fnName = m[2];
-      const params = m[3].replace(/\s+/g, " ").trim();
-      const ret = m[4]?.trim();
+      const parenStart = content.indexOf("(", m.index + m[0].length - 1);
+      const parenEnd = findMatchingParen(content, parenStart);
+      if (parenEnd === -1) continue;
+      const params = content.slice(parenStart + 1, parenEnd).replace(/\s+/g, " ").trim();
+      const after = content.slice(parenEnd + 1, parenEnd + 80);
+      const retMatch = after.match(/^\s*(?:async\s*)?(?:throws\s*)?(?:->\s*([^{=\n]+))?/);
+      const ret = retMatch?.[1]?.trim();
       const line = lineOf(content, m.index);
-      const owner = indent > 0 ? [...classes].reverse().find((c) => c.line <= line && line - c.line <= 500) : undefined;
+      const owner = indent > 0 ? [...classes].reverse().find((c) => c.line <= line && line - c.line <= 600) : undefined;
       const fullName = owner ? `${owner.name}.${fnName}` : fnName;
       push(fullName, "component", `func ${fullName}(${params})${ret ? ` -> ${ret}` : ""}`, m.index);
     }

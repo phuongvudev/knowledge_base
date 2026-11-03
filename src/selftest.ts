@@ -486,7 +486,7 @@ await run("ts parser: methods of an exported object literal belong to it", async
   assert.match(codeParser.parseFile("jobs.ts", src).find((e) => e.name === "jobs.cancel")!.summary, /cancel\(id: number\): boolean — Marks a job cancelled/);
 });
 
-await run("dart parser: types, public methods, /// docs, monorepo package imports", async () => {
+await run("dart parser: types, public and private methods, /// docs, monorepo package imports", async () => {
   const { codeParser } = await import("./engine/parsers/code_parser.js");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kb-dart-"));
   fs.mkdirSync(path.join(dir, "packages/core/lib"), { recursive: true });
@@ -501,7 +501,7 @@ await run("dart parser: types, public methods, /// docs, monorepo package import
   ].join("\n");
   fs.writeFileSync(app, src);
   const names = codeParser.parseFile(app, src).map((e) => e.name);
-  assert.deepEqual(names.sort(), ["ConsentStore", "ConsentStore.isGranted", "Mode"]);
+  assert.deepEqual(names.sort(), ["ConsentStore", "ConsentStore._hidden", "ConsentStore.isGranted", "Mode", "_Private"]);
   assert.match(codeParser.parseFile(app, src).find((e) => e.name === "ConsentStore")!.summary, /Keeps the consent flag/);
   const imp = codeParser.parseImports(app, src);
   assert.deepEqual(imp.internal, [path.join(dir, "packages/core/lib/money.dart")]);
@@ -675,16 +675,16 @@ await run("optimizations: path aliases, cross-file CALLS, doc section line excer
   const { graphMemory } = await import("./engine/graph_memory.js");
   const { handleGraphTool } = await import("./tools/graph_tools.js");
 
-  // 1. Kotlin & Swift parsers
+  // 1. Kotlin & Swift parsers (including private methods)
   const ktSrc = `package com.example\nimport io.ktor.client.HttpClient\n/** Core kernel orchestrator. */\nclass KernelEngine : BaseEngine {\n  fun startEngine(port: Int): Boolean {\n    return true\n  }\n  private fun secret() {}\n}\ndata class Config(val host: String)\n`;
   const ktEntities = codeParser.parseFile("KernelEngine.kt", ktSrc);
-  assert.deepEqual(ktEntities.map((e) => e.name).sort(), ["Config", "KernelEngine", "KernelEngine.startEngine"]);
+  assert.deepEqual(ktEntities.map((e) => e.name).sort(), ["Config", "KernelEngine", "KernelEngine.secret", "KernelEngine.startEngine"]);
   assert.equal(ktEntities.find((e) => e.name === "KernelEngine")?.kind, "service");
   assert.equal(ktEntities.find((e) => e.name === "Config")?.kind, "data_model");
 
   const swiftSrc = `import Foundation\n/// Manages user session.\npublic final class SessionManager: NSObject {\n  public func refreshToken(force: Bool) async throws -> String {\n    return "ok"\n  }\n  private func internalHelper() {}\n}\npublic struct UserProfile {\n  let id: String\n}\n`;
   const swiftEntities = codeParser.parseFile("SessionManager.swift", swiftSrc);
-  assert.deepEqual(swiftEntities.map((e) => e.name).sort(), ["SessionManager", "SessionManager.refreshToken", "UserProfile"]);
+  assert.deepEqual(swiftEntities.map((e) => e.name).sort(), ["SessionManager", "SessionManager.internalHelper", "SessionManager.refreshToken", "UserProfile"]);
 
   // 2. Path alias (@/) + cross-file symbol CALLS
   const aliasDir = path.join(tmp, "alias-proj");
@@ -717,6 +717,75 @@ await run("optimizations: path aliases, cross-file CALLS, doc section line excer
   const c1 = graphMemory.getCentrality("p-opt");
   const c2 = graphMemory.getCentrality("p-opt");
   assert.equal(c1, c2, "centrality map is cached when graph has not mutated");
+});
+
+await run("v2 optimizations: dart complex methods, code chunks, clean impact, no project root hijacking, force sync", async () => {
+  const { codeParser } = await import("./engine/parsers/code_parser.js");
+  const { handleGraphTool } = await import("./tools/graph_tools.js");
+  const { graphMemory } = await import("./engine/graph_memory.js");
+
+  // 1. Dart complex methods, closures, getters, private members
+  const dartCode = `
+class FinanceTool {
+  static List<String> get allTopics => ['budgets', 'accounts'];
+  static FinanceTopic budgetsTopic(
+    Future<List<String>> Function() progress,
+  ) => (
+    description: 'Budgets overview',
+  );
+  String _plain(String s) => s.toLowerCase();
+  Future<void> _byCategory(List<String> items) async {
+    print(items);
+  }
+}
+`;
+  const dartEntities = codeParser.parseFile("finance_tool.dart", dartCode);
+  const dartNames = dartEntities.map((e) => e.name);
+  assert.ok(dartNames.includes("FinanceTool.allTopics"), "getter parsed");
+  assert.ok(dartNames.includes("FinanceTool.budgetsTopic"), "multiline closure param method parsed");
+  assert.ok(dartNames.includes("FinanceTool._plain"), "private method _plain parsed");
+  assert.ok(dartNames.includes("FinanceTool._byCategory"), "private method _byCategory parsed");
+
+  // 2. Code chunking on long entities (> 35 lines)
+  const longFuncLines = [
+    "class LongWorker {",
+    "  void doWork() {",
+    ...Array.from({ length: 80 }, (_, i) => i === 45 ? '    final prompt = "Figures from the app, answer from these only";' : `    doStep(${i});`),
+    "  }",
+    "}",
+  ].join("\n");
+  const chunkedEntities = codeParser.parseFile("worker.dart", longFuncLines);
+  const chunks = chunkedEntities.filter((e) => e.name.includes("#L"));
+  assert.ok(chunks.length >= 2, `should produce multiple chunks for 80+ lines: got ${chunks.length}`);
+  const promptChunk = chunks.find((c) => c.summary.includes("Figures from the app"));
+  assert.ok(promptChunk, "chunk containing prompt string literal is indexed with excerpt");
+
+  // 3. Impact analysis doesn't blow up via module containment
+  const testImpactDir = path.join(tmp, "impact-test");
+  fs.mkdirSync(testImpactDir, { recursive: true });
+  const f1 = path.join(testImpactDir, "f1.ts");
+  const f2 = path.join(testImpactDir, "f2.ts");
+  const f3 = path.join(testImpactDir, "f3.ts");
+  fs.writeFileSync(f1, "export function targetFn(): void {}\n");
+  fs.writeFileSync(f2, 'import { targetFn } from "./f1.js";\nexport function callerFn(): void { targetFn(); }\n');
+  fs.writeFileSync(f3, 'import "./f1.js";\nexport function unrelatedFn(): void {}\n');
+  await handleIngestionTool("kb_ingest_file", { project_id: "p-imp", file_path: f1, domain: "auto" }, db);
+  await handleIngestionTool("kb_ingest_file", { project_id: "p-imp", file_path: f2, domain: "auto" }, db);
+  await handleIngestionTool("kb_ingest_file", { project_id: "p-imp", file_path: f3, domain: "auto" }, db);
+
+  const targetId = graphMemory.getProjectNodes("p-imp").find((n: any) => n.label === "targetFn")!.id;
+  const impRes = (await handleGraphTool("kb_graph_impact", { target_node_id: targetId }, db))!.content[0].text;
+  assert.ok(impRes.includes("callerFn"), "callerFn is directly affected");
+  assert.ok(!impRes.includes("unrelatedFn"), "unrelatedFn in importing file must not appear in symbol impact");
+
+  // 4. Code search excludes project root overview node
+  await handleGraphTool("kb_project_create", { project_id: "p-imp", name: "Model On-Device App", description: "Personal finance app with on-device model and figures" }, db);
+  const searchRes = (await handleQueryTool("kb_search", { query: "targetFn", project_id: "p-imp" }, db))!.content[0].text;
+  assert.ok(!searchRes.includes("project:p-imp"), "project root node does not hijack code search");
+
+  // 5. kb_sync force: true re-indexes unchanged file hash
+  const syncRes = (await handleIngestionTool("kb_sync", { project_id: "p-imp", force: true }, db))!.content[0].text;
+  assert.ok(syncRes.includes("updated"), "force: true updates unchanged files");
 });
 
 server.close();

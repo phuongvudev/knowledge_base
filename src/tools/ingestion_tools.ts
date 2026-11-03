@@ -168,7 +168,7 @@ export async function handleIngestionTool(
   }
 
   if (name === "kb_sync") {
-    const { project_id, dir_path, ignore } = SyncSchema.parse(args);
+    const { project_id, dir_path, ignore, force } = SyncSchema.parse(args);
     const files = (db.prepare(`SELECT file_path, file_hash FROM raw_sources WHERE project_id = ? AND file_path IS NOT NULL`).all(project_id) as { file_path: string; file_hash: string }[]);
     let updated = 0, removed = 0, unchanged = 0, failed = 0;
     const ignoredNow = dir_path ? loadIgnore(dir_path, ignore) : () => false;
@@ -180,7 +180,7 @@ export async function handleIngestionTool(
           continue;
         }
         const result = await knowledgeExtractor.extractFromFile(project_id, f.file_path, "auto");
-        if (result.fileHash === f.file_hash) {
+        if (!force && result.fileHash === f.file_hash) {
           unchanged++;
           continue;
         }
@@ -194,7 +194,7 @@ export async function handleIngestionTool(
     const lines = [`Sync ${project_id}: ${updated} updated, ${removed} removed, ${unchanged} unchanged${failed ? `, ${failed} failed` : ""}`];
     if (dir_path) {
       syncProjectLexicon(db, project_id, dir_path);
-      const r = await handleIngestionTool("kb_batch_ingest_directory", { project_id, dir_path, ignore }, db);
+      const r = await handleIngestionTool("kb_batch_ingest_directory", { project_id, dir_path, ignore, force }, db);
       lines.push(r?.content[0].text.split("\n").filter((l) => /Ingested|Failed/.test(l)).join(" ") ?? "");
     }
     return { content: [{ type: "text", text: lines.join("\n") }] };

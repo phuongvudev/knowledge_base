@@ -32,7 +32,12 @@ const TYPE_RULES: Array<[string, string[]]> = [
   ["guide", ["huong dan", "guide", "tutorial", "how to", "readme", "cai dat", "installation"]],
 ];
 
-const CODE_EXT = new Set([".ts", ".tsx", ".js", ".jsx", ".py", ".java", ".go", ".rs", ".sql", ".json", ".yaml", ".yml", ".sh"]);
+const CODE_EXT = new Set([
+  ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+  ".dart", ".kt", ".kts", ".swift",
+  ".py", ".java", ".go", ".rs", ".sql", ".json", ".yaml", ".yml", ".sh",
+  ".c", ".cpp", ".h", ".hpp", ".cs"
+]);
 
 export function normalize(text: string): string {
   return text

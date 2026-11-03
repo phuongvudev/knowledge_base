@@ -37,6 +37,13 @@ const VI_EN: Array<[RegExp, string]> = [
   [/(?<![\p{L}\p{N}_])(xóa|hủy bỏ)(?![\p{L}\p{N}_])/giu, "delete remove discard"],
   [/(?<![\p{L}\p{N}_])(tìm kiếm|tra cứu)(?![\p{L}\p{N}_])/giu, "search query find lookup"],
   [/(?<![\p{L}\p{N}_])(định kỳ|lặp lại)(?![\p{L}\p{N}_])/giu, "recurring periodic repeat schedule"],
+  [/(?<![\p{L}\p{N}_])(trả lời|phản hồi|giải đáp)(?![\p{L}\p{N}_])/giu, "respond answer reply responder chat"],
+  [/(?<![\p{L}\p{N}_])(nhắc|bảo|yêu cầu|chỉ thị|hướng dẫn)(?![\p{L}\p{N}_])/giu, "prompt instruct instruction message"],
+  [/(?<![\p{L}\p{N}_])(số liệu|thống kê|con số)(?![\p{L}\p{N}_])/giu, "figure figures metric stat stats data summary"],
+  [/(?<![\p{L}\p{N}_])(mô hình|trí tuệ nhân tạo)(?![\p{L}\p{N}_])/giu, "model ai llm nano gemini ondevice"],
+  [/(?<![\p{L}\p{N}_])(ngân sách|chi tiêu)(?![\p{L}\p{N}_])/giu, "budget budgets spending expense"],
+  [/(?<![\p{L}\p{N}_])(chủ đề|chuyên mục)(?![\p{L}\p{N}_])/giu, "topic topics category"],
+  [/(?<![\p{L}\p{N}_])(hàm|phương thức)(?![\p{L}\p{N}_])/giu, "function method"],
 ];
 // Universal developer synonyms: only used to widen the OR pass when exact match finds nothing
 const SYNONYMS: Array<[RegExp, string]> = [
@@ -295,8 +302,17 @@ export async function handleQueryTool(
       // bm25 is negative (lower = better): a library hit must beat the project's own by a margin to rank above it
       const adj = (r: any) => r.score * (libs.has(graphMemory.getNode(r.id)?.project_id ?? "") ? 0.8 : 1);
       if (libs.size) found.sort((a, b) => adj(a) - adj(b));
-      // "not indexed yet" import stubs and node:fs-style package nodes say nothing useful
-      found = found.filter((r) => { const pr = graphMemory.getNode(r.id)?.properties; return !pr?.placeholder && !pr?.is_external; });
+      // "not indexed yet" import stubs, external packages, and project root overview nodes (unless explicitly requested)
+      const isAskingForProjectOverview = /\b(project|overview|architecture|dự án|tổng quan)\b/i.test(query);
+      found = found.filter((r) => {
+        const node = graphMemory.getNode(r.id);
+        const pr = node?.properties;
+        if (pr?.placeholder || pr?.is_external) return false;
+        if (!isAskingForProjectOverview && (pr?.is_project_root || pr?.is_library || r.id.startsWith("project:"))) {
+          return false;
+        }
+        return true;
+      });
       // Fakes and tests mirror the real code and crowd it out; keep them behind unless the query asks for tests
       if (!tokens.some((t) => /^tests?$/i.test(t))) {
         const isTest = (r: any) => TEST_PATH.test(graphMemory.getNode(r.id)?.properties?.file_path ?? "");
@@ -423,7 +439,7 @@ export async function handleQueryTool(
     const { file_path, project_id } = FileOutlineSchema.parse(args);
     const hits = (project_id ? graphMemory.getProjectNodes(project_id) : graphMemory.getAllNodes()).filter((n) => {
       const fp = n.properties?.file_path as string | undefined;
-      return fp && (fp === file_path || fp.endsWith("/" + file_path.replace(/^\/+/, ""))) && n.node_type !== "module" && !n.properties?.placeholder;
+      return fp && (fp === file_path || fp.endsWith("/" + file_path.replace(/^\/+/, ""))) && n.node_type !== "module" && !n.properties?.placeholder && !n.properties?.is_chunk;
     });
     if (hits.length === 0) {
       return { content: [{ type: "text", text: `No indexed symbols for '${file_path}'. Use kb_ingest_file if it is not indexed yet.` }], isError: true };
