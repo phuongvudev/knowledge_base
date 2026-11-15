@@ -148,15 +148,21 @@ export async function handleGraphTool(
   }
 
   if (name === "kb_graph_explore") {
-    const { node_id, depth } = GraphExploreSchema.parse(args);
+    const { node_id, depth, project_id } = GraphExploreSchema.parse(args);
 
     const tGraphStart = process.hrtime.bigint();
-    const center = graphMemory.resolveNode(node_id);
+    let center = graphMemory.resolveNode(node_id, project_id);
     if (!center) {
-      return {
-        content: [{ type: "text", text: `Node '${node_id}' not found in knowledge graph.` }],
-        isError: true,
-      };
+      const suggestions = graphMemory.suggestNodes(node_id, project_id, 3);
+      if (suggestions.length === 1) {
+        center = suggestions[0];
+      } else {
+        const hint = suggestions.length > 0 ? ` Did you mean: ${suggestions.map((s) => `\`${s.id}\` (${s.label})`).join(", ")}?` : "";
+        return {
+          content: [{ type: "text", text: `Node '${node_id}' not found in knowledge graph.${hint}` }],
+          isError: true,
+        };
+      }
     }
 
     const { nodes, edges } = graphMemory.getRadialSubgraph(center.id, depth, 15);
@@ -209,43 +215,67 @@ export async function handleGraphTool(
   }
 
   if (name === "kb_graph_impact") {
-    const { target_node_id } = GraphImpactSchema.parse(args);
+    const { target_node_id, project_id } = GraphImpactSchema.parse(args);
 
     const tGraphStart = process.hrtime.bigint();
-    const targetNode = graphMemory.resolveNode(target_node_id);
+    let targetNode = graphMemory.resolveNode(target_node_id, project_id);
     if (!targetNode) {
-      return {
-        content: [{ type: "text", text: `Node '${target_node_id}' not found in knowledge graph.` }],
-        isError: true,
-      };
+      const suggestions = graphMemory.suggestNodes(target_node_id, project_id, 3);
+      if (suggestions.length === 1) {
+        targetNode = suggestions[0];
+      } else {
+        const hint = suggestions.length > 0 ? ` Did you mean: ${suggestions.map((s) => `\`${s.id}\` (${s.label})`).join(", ")}?` : "";
+        return {
+          content: [{ type: "text", text: `Node '${target_node_id}' not found in knowledge graph.${hint}` }],
+          isError: true,
+        };
+      }
     }
 
     const { affectedNodes, paths } = graphMemory.getImpactSubgraph(targetNode.id);
     const graphDuration = Number(process.hrtime.bigint() - tGraphStart) / 1_000_000;
 
-    const MAX_SHOWN_NODES = 25;
+    const MAX_SHOWN_NODES = 20;
     const shownNodes = affectedNodes.slice(0, MAX_SHOWN_NODES);
 
+    const filePaths = shownNodes
+      .map((n) => n.properties?.file_path as string | undefined)
+      .filter(Boolean) as string[];
+    let root = filePaths.length ? filePaths[0].slice(0, filePaths[0].lastIndexOf("/") + 1) : "";
+    for (const p of filePaths) {
+      while (root && !p.startsWith(root)) {
+        root = root.slice(0, root.slice(0, -1).lastIndexOf("/") + 1);
+      }
+    }
+
     const lines: string[] = [
-      `### Impact Analysis for: \`${targetNode.id}\` (${targetNode.label})`,
-      `Found **${affectedNodes.length} components/rules** directly or transitively dependent on this node.`,
-      "",
+      `### Impact Analysis: \`${targetNode.id}\` (${targetNode.label}) — **${affectedNodes.length}** dependents`,
     ];
+    if (root) lines.push(`paths relative to ${root}`);
 
     if (affectedNodes.length === 0) {
-      lines.push("No downstream dependencies found. This node can be safely modified or refactored.");
+      lines.push("No downstream dependencies found. Safe to modify or refactor.");
     } else {
       lines.push("**Affected Downstream Entities:**");
       for (const node of shownNodes) {
-        lines.push(`- \`${node.id}\` [${node.node_type}]: ${node.label} — ${node.summary}`);
+        const typeTag = node.id.startsWith(node.node_type + ":") ? "" : ` [${node.node_type}]`;
+        const fp = node.properties?.file_path as string | undefined;
+        const relFp = fp ? (root && fp.startsWith(root) ? fp.slice(root.length) : fp) : "";
+        const loc = relFp ? ` → ${relFp}${node.properties?.line ? `:${node.properties.line}` : ""}` : "";
+        let sum = node.summary.replace(/\s+/g, " ").trim();
+        if (sum.toLowerCase().startsWith(node.label.toLowerCase())) {
+          sum = sum.slice(node.label.length).replace(/^[\s:—-]+/, "");
+        }
+        if (sum.length > 85) sum = sum.slice(0, 84) + "…";
+        lines.push(`- \`${node.id}\`${typeTag}: ${node.label}${sum ? ` — ${sum}` : ""}${loc}`);
       }
       if (affectedNodes.length > MAX_SHOWN_NODES) {
-        lines.push(`... +${affectedNodes.length - MAX_SHOWN_NODES} more transitive dependents omitted to preserve context budget.`);
+        lines.push(`... +${affectedNodes.length - MAX_SHOWN_NODES} more transitive dependents omitted.`);
       }
       lines.push("");
       lines.push("**Dependency Chains:**");
-      for (const path of paths.slice(0, 12)) {
-        lines.push(`- \`${path.source_id}\` depends on \`${path.target_id}\` via \`${path.relation_type}\``);
+      for (const path of paths.slice(0, 10)) {
+        lines.push(`- \`${path.source_id}\` --[${path.relation_type}]--> \`${path.target_id}\``);
       }
     }
 

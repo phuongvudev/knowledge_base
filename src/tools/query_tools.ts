@@ -1,8 +1,12 @@
+import fs from "node:fs";
+import path from "node:path";
 import { DatabaseInstance } from "../database.js";
 import { graphMemory } from "../engine/graph_memory.js";
 import { computeCentrality } from "../engine/pagerank.js";
 import { telemetry } from "../engine/telemetry.js";
 import { depHint, linkedProjects, listDeps } from "../engine/deps.js";
+import { knowledgeExtractor } from "../engine/parsers/extractor.js";
+import { persistExtraction } from "../engine/persist.js";
 import { FileOutlineSchema, MetricsSchema, NodeGetSchema, SearchSchema, StatsSchema } from "../types.js";
 
 // Column weights: label and summary are what a person would search; the JSON properties blob is mostly paths
@@ -84,29 +88,37 @@ export async function handleQueryTool(
   `);
 
   if (name === "kb_node_get") {
-    const { node_id, include_raw } = NodeGetSchema.parse(args);
+    const { node_id, include_raw, project_id } = NodeGetSchema.parse(args);
 
-    const node = graphMemory.resolveNode(node_id);
+    let node = graphMemory.resolveNode(node_id, project_id);
     if (!node) {
-      return {
-        content: [{ type: "text", text: `Node '${node_id}' not found.` }],
-        isError: true,
-      };
+      const suggestions = graphMemory.suggestNodes(node_id, project_id, 3);
+      if (suggestions.length === 1) {
+        node = suggestions[0];
+      } else {
+        const hint = suggestions.length > 0 ? ` Did you mean: ${suggestions.map((s) => `\`${s.id}\` (${s.label})`).join(", ")}?` : "";
+        return {
+          content: [{ type: "text", text: `Node '${node_id}' not found.${hint}` }],
+          isError: true,
+        };
+      }
     }
     const resolvedId = node.id;
 
     const lines: string[] = [
       `### ${node.label} (\`${node.id}\`)`,
-      `- **Type:** ${node.node_type}`,
-      `- **Domain:** ${node.domain}`,
-      `- **Project:** ${node.project_id}`,
+      `- **Type:** ${node.node_type} | **Domain:** ${node.domain} | **Project:** ${node.project_id}`,
       `- **Summary:** ${node.summary}`,
     ];
     const where = locationOf(node);
     if (where) lines.push(`- **Location:** \`${where}\``);
 
-    if (Object.keys(node.properties || {}).length > 0) {
-      lines.push(`- **Properties:** \`${JSON.stringify(node.properties)}\``);
+    const INTERNAL_PROPS = new Set(["file_path", "line", "end_line", "calls", "internal_imports", "placeholder", "is_chunk"]);
+    const customProps = Object.fromEntries(
+      Object.entries(node.properties || {}).filter(([k]) => !INTERNAL_PROPS.has(k))
+    );
+    if (Object.keys(customProps).length > 0) {
+      lines.push(`- **Properties:** \`${JSON.stringify(customProps)}\``);
     }
 
     // 360-degree Call Graph & Dependencies
@@ -436,18 +448,82 @@ export async function handleQueryTool(
   }
 
   if (name === "kb_file_outline") {
-    const { file_path, project_id } = FileOutlineSchema.parse(args);
-    const hits = (project_id ? graphMemory.getProjectNodes(project_id) : graphMemory.getAllNodes()).filter((n) => {
-      const fp = n.properties?.file_path as string | undefined;
-      return fp && (fp === file_path || fp.endsWith("/" + file_path.replace(/^\/+/, ""))) && n.node_type !== "module" && !n.properties?.placeholder && !n.properties?.is_chunk;
-    });
+    const parsed = FileOutlineSchema.parse(args);
+    const file_path = parsed.file_path.trim();
+    const project_id = graphMemory.resolveProjectId(parsed.project_id);
+
+    const collectFileNodes = () => {
+      const exactNodes = graphMemory.getNodesByFile(file_path, project_id);
+      if (exactNodes.length > 0) return exactNodes;
+      const normSuffix = "/" + file_path.replace(/^\/+/, "");
+      const pool = project_id ? graphMemory.getProjectNodes(project_id) : graphMemory.getAllNodes();
+      return pool.filter((n) => {
+        const fp = n.properties?.file_path as string | undefined;
+        return fp && (fp === file_path || fp.endsWith(normSuffix));
+      });
+    };
+
+    let fileNodes = collectFileNodes();
+
+    // If not yet indexed in graphMemory, check if the file exists on disk inside the project and auto-ingest on the fly
+    if (fileNodes.length === 0) {
+      let diskPath: string | undefined;
+      let targetProj = project_id;
+      if (path.isAbsolute(file_path) && fs.existsSync(file_path)) {
+        diskPath = file_path;
+      } else if (targetProj) {
+        const root = graphMemory.getProjectRoot(targetProj);
+        if (root) {
+          const cleanRel = file_path.replace(/^\/+/, "");
+          const candidates = [
+            path.join(root, cleanRel),
+            path.join(path.dirname(root), cleanRel),
+          ];
+          diskPath = candidates.find((c) => fs.existsSync(c));
+        }
+      }
+      if (diskPath && !targetProj) {
+        // Infer project from whose root directory contains diskPath
+        const projs = db.prepare("SELECT id FROM projects").all() as Array<{ id: string }>;
+        for (const p of projs) {
+          const r = graphMemory.getProjectRoot(p.id);
+          if (r && diskPath.startsWith(r + "/")) {
+            targetProj = p.id;
+            break;
+          }
+        }
+      }
+      if (diskPath && targetProj && fs.statSync(diskPath).isFile()) {
+        try {
+          const extracted = await knowledgeExtractor.extractFromFile(targetProj, diskPath, "auto");
+          persistExtraction(db, targetProj, diskPath, extracted);
+          fileNodes = collectFileNodes();
+        } catch {
+          // ignore auto-ingest failure and fall through
+        }
+      }
+    }
+
+    // 1. Primary: code/rule symbols (non-module, non-placeholder, non-chunk)
+    let hits = fileNodes.filter((n) => n.node_type !== "module" && !n.properties?.placeholder && !n.properties?.is_chunk);
+    // 2. Fallback: markdown/doc section chunks (non-module, non-placeholder)
+    if (hits.length === 0 && fileNodes.length > 0) {
+      hits = fileNodes.filter((n) => n.node_type !== "module" && !n.properties?.placeholder);
+    }
+    // 3. Fallback: module-only file (e.g. barrel index.ts, tsconfig.json, small config/UI stub)
+    if (hits.length === 0 && fileNodes.length > 0) {
+      hits = fileNodes.filter((n) => !n.properties?.placeholder);
+    }
+
     if (hits.length === 0) {
       return { content: [{ type: "text", text: `No indexed symbols for '${file_path}'. Use kb_ingest_file if it is not indexed yet.` }], isError: true };
     }
     hits.sort((a, b) => (a.properties?.line ?? 0) - (b.properties?.line ?? 0));
-    const lines = [`${hits[0].properties.file_path} (${hits.length} symbols)`];
+    const resolvedFp = hits[0].properties.file_path;
+    const isModuleOnly = hits.length === 1 && hits[0].node_type === "module";
+    const lines = [`${resolvedFp} (${isModuleOnly ? "1 module overview, 0 child symbols" : `${hits.length} symbols`})`];
     const clip = (t: string) => (t.length > 120 ? t.slice(0, 119) + "…" : t); // a large file's outline must stay cheap
-    for (const n of hits) lines.push(`${n.properties?.line ?? "-"} ${n.id} — ${clip(stripWords(n.summary))}`);
+    for (const n of hits) lines.push(`${n.properties?.line ?? 1} ${n.id} — ${clip(stripWords(n.summary))}`);
     const rendered = lines.join("\n");
     const { footer } = telemetry.record(name, startTime, null, null, rendered, rawSearchText(db, [hits[0].id], 32_000));
     return { content: [{ type: "text", text: rendered + footer }] };

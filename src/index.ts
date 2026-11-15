@@ -87,6 +87,7 @@ async function main() {
   // 4. Connect Stdio Transport
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  process.stdin.on("close", () => process.exit(0));
 
   console.error(
     `[Neural Knowledge Base] Server running on stdio (Nodes: ${

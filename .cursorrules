@@ -1,9 +1,9 @@
 # Cursor Rules: Local Neural Knowledge Base
 
-Knowledge base (MCP `knowledge-base`): use it BEFORE grep/glob/reading files to find code or learn how something works.
-1. Locate: kb_search(query, project_id, code=12). Ask in plain words ("where token savings are computed"), not regex. Each hit has id + path:line: open that line, don't read whole files.
-2. project_id: call kb_project_list once per session. To see a file's contents at a glance use kb_file_outline(file_path) instead of reading it.
-3. Before changing or removing a symbol: kb_graph_impact(node_id). Neighbours of a hit: kb_graph_explore(node_id).
-4. Unfamiliar project: kb_graph_overview(project_id) first.
-5. No hits, or project not indexed: use grep, then kb_ingest_file / kb_batch_ingest_directory so the next search works. If a hit's path:line looks stale, trust the file and run kb_sync(project_id) after editing code.
-6. Persist user decisions and conventions with kb_add_node; report missing pieces with kb_flag_gap.
+> **CRITICAL RULE**: The `knowledge-base` MCP server is the PRIMARY sensory system for this workspace. Blind filesystem inspection (`grep`, `glob`, reading whole files) wastes 80–90% of the context window.
+
+1. **Zero-Blind-Search**: ALWAYS call `kb_search(query, project_id, code=12)` FIRST in plain words (English or Vietnamese). `project_id` auto-normalizes `_` and `-` (e.g., `"budgetable_v2"` <-> `"budgetable-v2"`). Each hit includes `file_path:line` and 12 lines of code.
+2. **Large File Protection**: NEVER read whole files (>100 lines) blindly. Call `kb_file_outline(file_path)` first to see symbols and line numbers, then read only the exact line range.
+3. **Pre-Modification Impact**: Before changing or refactoring any symbol or file, call `kb_graph_impact(target_node_id)` (accepts class/function name, file path, or node ID directly).
+4. **3rd-Party Libraries**: Call `kb_resolve_library(project_id, library_name, auto_ingest=true)` instead of inspecting `.pub-cache` or `node_modules` manually.
+5. **Continuous Sync**: After editing code, run `kb_sync(project_id)`. Persist architectural decisions and business rules via `kb_add_node`.

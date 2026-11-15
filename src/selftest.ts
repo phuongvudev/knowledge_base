@@ -786,6 +786,48 @@ class FinanceTool {
   // 5. kb_sync force: true re-indexes unchanged file hash
   const syncRes = (await handleIngestionTool("kb_sync", { project_id: "p-imp", force: true }, db))!.content[0].text;
   assert.ok(syncRes.includes("updated"), "force: true updates unchanged files");
+
+  // 6. Monorepo sub-package alias resolution (e.g. "p-imp-core" or "@p-imp/core" -> "p-imp")
+  assert.equal(graphMemory.resolveProjectId("p-imp-core"), "p-imp", "subpackage resolves to parent project");
+  assert.equal(graphMemory.resolveProjectId("@p-imp/core"), "p-imp", "scoped package resolves to parent project");
+  const subSearch = (await handleQueryTool("kb_search", { query: "targetFn", project_id: "p-imp-core" }, db))!.content[0].text;
+  assert.ok(subSearch.includes("targetFn") && !subSearch.includes("(0 matches)"), "search with subpackage alias hits parent project");
+
+  // 7. Unqualified method & class container impact resolution + compact location output
+  const clsFile = path.join(testImpactDir, "service.ts");
+  const clsCaller = path.join(testImpactDir, "consumer.ts");
+  fs.writeFileSync(clsFile, "export class OrderService {\n  computeTotal(x: number): number { return x * 2; }\n}\n");
+  fs.writeFileSync(clsCaller, 'import { OrderService } from "./service.js";\nexport function checkout() { return new OrderService().computeTotal(10); }\n');
+  await handleIngestionTool("kb_ingest_file", { project_id: "p-imp", file_path: clsFile, domain: "auto" }, db);
+  await handleIngestionTool("kb_ingest_file", { project_id: "p-imp", file_path: clsCaller, domain: "auto" }, db);
+
+  // Resolve by unqualified method name "computeTotal"
+  const methodImp = (await handleGraphTool("kb_graph_impact", { target_node_id: "computeTotal", project_id: "p-imp" }, db))!.content[0].text;
+  assert.ok(methodImp.includes("checkout"), `unqualified method impact should find checkout: ${methodImp}`);
+  assert.ok(methodImp.includes("consumer.ts:"), `impact output should include caller file:line: ${methodImp}`);
+
+  // Resolve by class name "OrderService" (seeds member methods too)
+  const classImp = (await handleGraphTool("kb_graph_impact", { target_node_id: "OrderService", project_id: "p-imp" }, db))!.content[0].text;
+  assert.ok(classImp.includes("checkout"), `class container impact should include callers of its methods: ${classImp}`);
+
+  // 8. kb_file_outline fallbacks: markdown doc sections, module-only config, and on-demand auto-ingest
+  const docOutline = (await handleQueryTool("kb_file_outline", { file_path: "policy.md", project_id: "p-opt" }, db))!;
+  assert.ok(!docOutline.isError && docOutline.content[0].text.includes("dieu_9"), "markdown outline returns section chunks");
+
+  const cfgFile = path.join(testImpactDir, "tsconfig.json");
+  fs.writeFileSync(cfgFile, '{\n  "compilerOptions": { "strict": true }\n}\n');
+  await handleIngestionTool("kb_ingest_file", { project_id: "p-imp", file_path: cfgFile, domain: "auto" }, db);
+  const cfgOutline = (await handleQueryTool("kb_file_outline", { file_path: "tsconfig.json", project_id: "p-imp" }, db))!;
+  assert.ok(!cfgOutline.isError && cfgOutline.content[0].text.includes("tsconfig.json"), "module-only config outline succeeds without error");
+
+  const unindexedFile = path.join(testImpactDir, "lazy_new.ts");
+  fs.writeFileSync(unindexedFile, "export function lazyHelper(): string { return 'ok'; }\n");
+  const lazyOutline = (await handleQueryTool("kb_file_outline", { file_path: "lazy_new.ts", project_id: "p-imp" }, db))!;
+  assert.ok(!lazyOutline.isError && lazyOutline.content[0].text.includes("lazyHelper"), "on-demand auto-ingest outline succeeds for unindexed project file");
+
+  // 9. kb_node_get omits noisy internal properties (calls, file_path, line)
+  const nodeGetRes = (await handleQueryTool("kb_node_get", { node_id: "checkout", project_id: "p-imp" }, db))!.content[0].text;
+  assert.ok(!nodeGetRes.includes('"internal_imports"') && !nodeGetRes.includes('"file_path"'), "internal properties omitted from kb_node_get");
 });
 
 server.close();

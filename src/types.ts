@@ -171,10 +171,12 @@ export const GraphOverviewSchema = z.object({
 export const GraphExploreSchema = z.object({
   node_id: z.string().describe("ID of the central node to explore"),
   depth: z.number().min(1).max(2).optional().default(1).describe("Search radius (1-2 steps)"),
+  project_id: z.string().optional().describe("Optional project filter to disambiguate symbol"),
 });
 
 export const GraphImpactSchema = z.object({
   target_node_id: z.string().describe("ID of the node being modified or evaluated"),
+  project_id: z.string().optional().describe("Optional project filter to disambiguate symbol"),
 });
 
 export const IngestFileSchema = z.object({
@@ -239,6 +241,7 @@ export const AuditGapsSchema = z.object({
 export const NodeGetSchema = z.object({
   node_id: z.string().describe("ID of the node to retrieve"),
   include_raw: z.boolean().optional().default(false).describe("Whether to fetch raw source text/provenance excerpt"),
+  project_id: z.string().optional().describe("Optional project filter to disambiguate symbol"),
 });
 
 export const SearchSchema = z.object({

@@ -180,7 +180,9 @@ export async function handleIngestionTool(
   }
 
   if (name === "kb_sync") {
-    const { project_id, dir_path, ignore, force } = SyncSchema.parse(args);
+    const parsedSync = SyncSchema.parse(args);
+    const { dir_path, ignore, force } = parsedSync;
+    const project_id = graphMemory.resolveProjectId(parsedSync.project_id) || parsedSync.project_id;
     const files = (db.prepare(`SELECT file_path, file_hash FROM raw_sources WHERE project_id = ? AND file_path IS NOT NULL`).all(project_id) as { file_path: string; file_hash: string }[]);
     let updated = 0, removed = 0, unchanged = 0, failed = 0;
     const ignoredNow = dir_path ? loadIgnore(dir_path, ignore) : () => false;

@@ -97,8 +97,15 @@ export function persistExtraction(
       const importedSymbolByName = new Map<string, string>();
       for (const impFile of importedFiles) {
         for (const sym of graphMemory.getNodesByFile(impFile, projectId)) {
-          if (sym.node_type !== "module" && !sym.properties?.placeholder) {
+          if (sym.node_type !== "module" && !sym.properties?.placeholder && !sym.properties?.is_chunk) {
             importedSymbolByName.set(sym.label, sym.id);
+            const dotIdx = sym.label.lastIndexOf(".");
+            if (dotIdx > 0) {
+              const shortName = sym.label.slice(dotIdx + 1);
+              if (!importedSymbolByName.has(shortName)) {
+                importedSymbolByName.set(shortName, sym.id);
+              }
+            }
           }
         }
       }
@@ -121,8 +128,15 @@ export function persistExtraction(
     if (fileModuleNode) {
       const newSymbolByName = new Map<string, string>();
       for (const n of result.nodes) {
-        if (n.node_type !== "module" && !n.properties?.placeholder && !n.properties?.is_external) {
+        if (n.node_type !== "module" && !n.properties?.placeholder && !n.properties?.is_external && !n.properties?.is_chunk) {
           newSymbolByName.set(n.label, n.id);
+          const dotIdx = n.label.lastIndexOf(".");
+          if (dotIdx > 0) {
+            const shortName = n.label.slice(dotIdx + 1);
+            if (!newSymbolByName.has(shortName)) {
+              newSymbolByName.set(shortName, n.id);
+            }
+          }
         }
       }
       if (newSymbolByName.size > 0) {

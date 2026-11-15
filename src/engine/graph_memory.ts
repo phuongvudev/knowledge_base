@@ -193,7 +193,9 @@ export class GraphMemoryCache {
     if (!projectId) return undefined;
     if (this.projectNodes.has(projectId)) return projectId;
 
-    const clean = projectId.replace(/\/+$/, "").split("/").pop() || projectId;
+    // Strip npm @scope/ prefix (e.g. "@rail/core" -> "rail-core") or trailing path segments
+    const scoped = projectId.trim().replace(/^@([^/]+)\/(.+)$/, "$1-$2");
+    const clean = scoped.replace(/\/+$/, "").split("/").pop() || scoped;
     if (this.projectNodes.has(clean)) return clean;
 
     const norm = (s: string) => s.toLowerCase().replace(/[-_\s]+/g, "-");
@@ -201,41 +203,169 @@ export class GraphMemoryCache {
     for (const existing of this.projectNodes.keys()) {
       if (norm(existing) === targetNorm) return existing;
     }
+
+    // Monorepo sub-package / prefix alias resolution (e.g. "rail-core" -> "rail", "reshub" -> "reshub-web", "budgetable-core" -> "budgetable-v2")
+    const isTargetLib = targetNorm.startsWith("lib-");
+    const candidates = Array.from(this.projectNodes.keys()).filter(
+      (k) => isTargetLib || !norm(k).startsWith("lib-")
+    );
+
+    // 1. Target is "<existing>-<subpkg>" (e.g. "rail-core" matches "rail") — prefer longest existing prefix
+    let bestPrefixMatch: string | undefined;
+    for (const existing of candidates) {
+      const exNorm = norm(existing);
+      if (targetNorm.startsWith(exNorm + "-")) {
+        if (!bestPrefixMatch || exNorm.length > norm(bestPrefixMatch).length) {
+          bestPrefixMatch = existing;
+        }
+      }
+    }
+    if (bestPrefixMatch) return bestPrefixMatch;
+
+    // 2. Existing is "<target>-<suffix>" (e.g. "reshub" matches "reshub-web", "budgetable" matches "budgetable-v2")
+    const superMatches = candidates.filter((existing) => norm(existing).startsWith(targetNorm + "-"));
+    if (superMatches.length === 1) return superMatches[0];
+
+    // 3. Shared leading root token "<root>-*" when unique among non-library projects (e.g. "budgetable-core" -> "budgetable-v2")
+    const rootToken = targetNorm.split("-")[0];
+    if (rootToken && rootToken.length >= 3) {
+      const rootMatches = candidates.filter((existing) => {
+        const exNorm = norm(existing);
+        return exNorm === rootToken || exNorm.startsWith(rootToken + "-");
+      });
+      if (rootMatches.length === 1) return rootMatches[0];
+    }
+
     return projectId;
   }
 
+  public getProjectRoot(projectId?: string): string | undefined {
+    const resolved = this.resolveProjectId(projectId);
+    if (!resolved) return undefined;
+    const nodes = this.getProjectNodes(resolved);
+    const paths: string[] = [];
+    for (const n of nodes) {
+      const fp = n.properties?.file_path;
+      if (typeof fp === "string" && fp.startsWith("/")) {
+        paths.push(fp);
+        if (paths.length >= 40) break;
+      }
+    }
+    if (paths.length === 0) return undefined;
+    let root = paths[0].slice(0, paths[0].lastIndexOf("/") + 1);
+    for (const p of paths) {
+      while (root && !p.startsWith(root)) {
+        root = root.slice(0, root.slice(0, -1).lastIndexOf("/") + 1);
+      }
+    }
+    return root ? root.replace(/\/+$/, "") : undefined;
+  }
+
   public resolveNode(idOrQuery: string, projectId?: string): GraphNode | undefined {
-    const exact = this.nodes.get(idOrQuery);
+    const rawTrimmed = idOrQuery.trim();
+    const exact = this.nodes.get(rawTrimmed);
     if (exact) return exact;
 
     const resolvedProj = this.resolveProjectId(projectId);
     const pool = resolvedProj ? this.getProjectNodes(resolvedProj) : this.getAllNodes();
-    const q = idOrQuery.trim();
+
+    // Strip optional :line or #L... suffix (unless the raw query is a node ID with colons like "component:a:b")
+    const hasNodePrefix = /^(?:component|module|data_model|service|rule|policy|decision|process|general|doc|config|role|api_endpoint|env_config|template):/i.test(rawTrimmed);
+    const q = (hasNodePrefix ? rawTrimmed : rawTrimmed.replace(/(?::\d+(?:-\d+)?|#L\d+(?:-\d+)?)$/i, ""))
+      .replace(/::|#/g, ".")
+      .trim();
     const qLower = q.toLowerCase();
     const qSlug = qLower.replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+    const stripAt = (id: string) => id.replace(/@[^@]+$/, "").toLowerCase();
 
-    // 1. Exact label match (case-insensitive, prefer non-module symbols then modules)
-    const labelHit = pool.find((n) => n.label.toLowerCase() === qLower && !n.properties?.placeholder);
+    // 0. Exact ID match ignoring @project suffix
+    const exactNoAt = pool.find((n) => stripAt(n.id) === qLower && !n.properties?.placeholder);
+    if (exactNoAt) return exactNoAt;
+
+    // 1. Exact label match (case-insensitive, prefer non-module, non-chunk symbols then modules)
+    const labelHit =
+      pool.find((n) => n.label.toLowerCase() === qLower && n.node_type !== "module" && !n.properties?.placeholder && !n.properties?.is_chunk) ||
+      pool.find((n) => n.label.toLowerCase() === qLower && !n.properties?.placeholder);
     if (labelHit) return labelHit;
 
-    // 2. File path or suffix match -> return the file's module node
+    // 2. Unqualified method / member match (e.g. "resolveProjectId" -> "GraphMemoryCache.resolveProjectId")
+    const memberHit = pool.find(
+      (n) =>
+        !n.properties?.placeholder &&
+        !n.properties?.is_chunk &&
+        n.label.toLowerCase().endsWith("." + qLower)
+    );
+    if (memberHit) return memberHit;
+
+    // 3. File path or suffix match -> prefer the file's module node, or primary symbol in that file
     const normPath = q.replace(/^\/+/, "");
-    const fileHit = pool.find((n) => {
+    const fileModuleHit = pool.find((n) => {
       if (n.node_type !== "module" || n.properties?.placeholder) return false;
       const fp = n.properties?.file_path as string | undefined;
       return fp && (fp === q || fp.endsWith("/" + normPath));
     });
-    if (fileHit) return fileHit;
+    if (fileModuleHit) return fileModuleHit;
 
-    // 3. Node ID suffix match (e.g. ":telemetryengine" or "module:engine_telemetry_ts")
-    const suffixHit = pool.find(
-      (n) =>
-        !n.properties?.placeholder &&
-        (n.id.toLowerCase().endsWith(":" + qLower) ||
-          n.id.toLowerCase().endsWith(":" + qSlug) ||
-          n.id.toLowerCase() === "module:" + qSlug)
-    );
-    return suffixHit;
+    const fileSymbolHit = pool.find((n) => {
+      if (n.properties?.placeholder || n.properties?.is_chunk) return false;
+      const fp = n.properties?.file_path as string | undefined;
+      return fp && (fp === q || fp.endsWith("/" + normPath));
+    });
+    if (fileSymbolHit) return fileSymbolHit;
+
+    // 4. Node ID suffix match (ignoring @project suffix, e.g. ":telemetryengine" or "_resolveprojectid" or "module:engine_telemetry_ts")
+    const suffixHit = pool.find((n) => {
+      if (n.properties?.placeholder || n.properties?.is_chunk) return false;
+      const baseId = stripAt(n.id);
+      return (
+        baseId.endsWith(":" + qLower) ||
+        baseId.endsWith(":" + qSlug) ||
+        baseId.endsWith("_" + qSlug) ||
+        baseId === "module:" + qSlug
+      );
+    });
+    if (suffixHit) return suffixHit;
+
+    // 5. Substring match on non-chunk symbol label when query is specific enough (>= 4 chars)
+    if (qLower.length >= 4 && !qLower.includes("/")) {
+      const subHits = pool.filter(
+        (n) =>
+          !n.properties?.placeholder &&
+          !n.properties?.is_chunk &&
+          n.node_type !== "module" &&
+          (n.label.toLowerCase().includes(qLower) || stripAt(n.id).includes(qSlug))
+      );
+      if (subHits.length > 0) {
+        subHits.sort((a, b) => a.label.length - b.label.length);
+        return subHits[0];
+      }
+    }
+
+    return undefined;
+  }
+
+  public suggestNodes(idOrQuery: string, projectId?: string, limit: number = 3): GraphNode[] {
+    const resolvedProj = this.resolveProjectId(projectId);
+    const pool = resolvedProj ? this.getProjectNodes(resolvedProj) : this.getAllNodes();
+    const tokens = idOrQuery
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((t) => t.length >= 3 && !["component", "module", "src", "lib", "dart", "tsx"].includes(t));
+    if (tokens.length === 0) return [];
+
+    const scored: Array<{ node: GraphNode; score: number }> = [];
+    for (const n of pool) {
+      if (n.properties?.placeholder || n.properties?.is_chunk) continue;
+      const hay = `${n.label} ${n.id} ${n.properties?.file_path ?? ""}`.toLowerCase();
+      let score = 0;
+      for (const t of tokens) {
+        if (n.label.toLowerCase().includes(t)) score += 3;
+        else if (hay.includes(t)) score += 1;
+      }
+      if (score > 0) scored.push({ node: n, score });
+    }
+    scored.sort((a, b) => b.score - a.score || a.node.label.length - b.node.label.length);
+    return scored.slice(0, limit).map((s) => s.node);
   }
 
   public getCentrality(projectId?: string): Map<string, NodeCentrality> {
@@ -383,7 +513,30 @@ export class GraphMemoryCache {
     const isSymbol = targetNode.node_type !== "module" && targetNode.node_type !== "project";
     const affectedIds = new Set<string>();
     const traversedEdges: GraphEdge[] = [];
+    const seedIds = new Set<string>([targetNodeId]);
     const queue: Array<{ id: string; depth: number }> = [{ id: targetNodeId, depth: 0 }];
+
+    // If targetNode is a module or a class container, also seed its contained symbols / methods at depth 0
+    const targetFp = targetNode.properties?.file_path as string | undefined;
+    if (targetFp) {
+      const fileNodes = this.getNodesByFile(targetFp, targetNode.project_id);
+      if (targetNode.node_type === "module") {
+        for (const fn of fileNodes) {
+          if (fn.id !== targetNodeId && !fn.properties?.placeholder && !fn.properties?.is_chunk) {
+            seedIds.add(fn.id);
+            queue.push({ id: fn.id, depth: 0 });
+          }
+        }
+      } else if (!targetNode.label.includes(".")) {
+        const classPrefix = targetNode.label.toLowerCase() + ".";
+        for (const fn of fileNodes) {
+          if (fn.id !== targetNodeId && !fn.properties?.placeholder && !fn.properties?.is_chunk && fn.label.toLowerCase().startsWith(classPrefix)) {
+            seedIds.add(fn.id);
+            queue.push({ id: fn.id, depth: 0 });
+          }
+        }
+      }
+    }
 
     const isPureBarrel = (node?: GraphNode) => {
       if (!node || node.node_type !== "module") return false;
@@ -404,12 +557,13 @@ export class GraphMemoryCache {
         for (let pass = 0; pass < 2; pass++) {
           for (const edge of inbound) {
             if ((pass === 0) !== (edge.relation_type === "CALLS")) continue;
-            if (edge.source_id === targetNodeId) continue;
+            if (seedIds.has(edge.source_id)) continue;
             // Never traverse backward across containment edges (module CONTAINS component, or method CONTAINS chunk)
             if (edge.relation_type === "CONTAINS" || edge.description?.toLowerCase().includes("contains")) {
               continue;
             }
             const srcNode = this.nodes.get(edge.source_id);
+            if (srcNode?.properties?.is_chunk || srcNode?.properties?.placeholder) continue;
             // For symbol-level impact, ignore module-level containment and barrel dependencies
             if (isSymbol && srcNode?.node_type === "module" && edge.relation_type !== "CALLS" && edge.relation_type !== "REFERENCES") {
               continue;
